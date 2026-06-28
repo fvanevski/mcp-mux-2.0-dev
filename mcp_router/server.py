@@ -3,18 +3,18 @@ import asyncio
 import logging
 import time
 from uuid import uuid4
+from dataclasses import dataclass
 from contextlib import asynccontextmanager
-from typing import List, Optional, Dict
+from typing import Optional
 from urllib.parse import urlparse, urlunparse
 import json
-import yaml
 import httpx
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 
-from mcp_router.core.config_loader import RouterConfig, ConfigWatcher, EndpointConfig
+from mcp_router.core.config_loader import RouterConfig, ConfigWatcher, EndpointConfig, load_router_config
 from mcp_router.core.process_manager import ProcessManager
 
 # Configure logging to console safely
@@ -23,6 +23,12 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger("mcp_router")
+
+@dataclass
+class BridgeSession:
+    path_prefix: str
+    queue: asyncio.Queue
+    remote_session_id: Optional[str] = None
 
 def get_target_url(config_url: str, request_path: str, path_prefix: str) -> str:
     parsed_cfg = urlparse(config_url)
@@ -88,6 +94,37 @@ def filter_tools_response(line_or_body: str, allowed_tools: Optional[list[str]],
         pass
     return line_or_body
 
+def build_response_headers(headers, exclude_headers: set[str], body_was_decoded: bool = False) -> dict[str, str]:
+    skipped = set(exclude_headers)
+    if body_was_decoded:
+        skipped.update({"content-encoding", "content-length"})
+    return {k: v for k, v in headers.items() if k.lower() not in skipped}
+
+def normalize_jsonrpc_request_body(body: bytes) -> bytes:
+    try:
+        payload = json.loads(body)
+    except Exception:
+        return body
+
+    changed = False
+
+    def normalize_message(message):
+        nonlocal changed
+        if isinstance(message, dict) and "method" in message and "jsonrpc" not in message:
+            message = dict(message)
+            message["jsonrpc"] = "2.0"
+            changed = True
+        return message
+
+    if isinstance(payload, list):
+        payload = [normalize_message(message) for message in payload]
+    else:
+        payload = normalize_message(payload)
+
+    if not changed:
+        return body
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
 class MCPRouter:
     def __init__(self, app: Starlette, config_path: str):
         self.app = app
@@ -97,7 +134,7 @@ class MCPRouter:
         self.last_activity: dict[str, float] = {}
         self.active_connections: dict[str, int] = {}
         self.locks: dict[str, asyncio.Lock] = {}
-        self.active_sessions: dict[str, asyncio.Queue] = {}
+        self.active_sessions: dict[str, BridgeSession] = {}
         self._running = False
         self._checker_task = None
 
@@ -124,6 +161,7 @@ class MCPRouter:
             self._configs.pop(path, None)
             self.last_activity.pop(path, None)
             self.locks.pop(path, None)
+            self._drop_sessions_for_path(path)
 
         # Update configs and setup locks
         for path, ep_cfg in new_endpoints.items():
@@ -132,6 +170,15 @@ class MCPRouter:
                 self.locks[path] = asyncio.Lock()
         
         logger.info(f"Applied config. Active paths: {list(self._configs.keys())}")
+
+    def _drop_sessions_for_path(self, path_prefix: str):
+        session_ids = [
+            session_id
+            for session_id, session in self.active_sessions.items()
+            if session.path_prefix == path_prefix
+        ]
+        for session_id in session_ids:
+            self.active_sessions.pop(session_id, None)
 
     async def idle_timeout_checker(self):
         while self._running:
@@ -237,37 +284,76 @@ class MCPRouter:
         # 3. Construct target URL
         request_path = request.url.path
         target_url = get_target_url(ep_cfg.url, request_path, path_prefix)
+        if ep_cfg.transport == "sse" and request_path.startswith(f"/{path_prefix}/"):
+            parsed_cfg = urlparse(ep_cfg.url)
+            upstream_path = request_path[len(f"/{path_prefix}"):]
+            target_url = urlunparse((
+                parsed_cfg.scheme,
+                parsed_cfg.netloc,
+                upstream_path,
+                "",
+                "",
+                "",
+            ))
 
         # 4. Proxy the request
         exclude_headers = {"host", "content-length", "connection", "transfer-encoding", "keep-alive"}
         forward_headers = {k: v for k, v in request.headers.items() if k.lower() not in exclude_headers}
+        if ep_cfg.headers:
+            forward_headers.update(ep_cfg.headers)
+        if ep_cfg.transport == "streamable-http" and request.method in {"POST", "DELETE"}:
+            forward_headers["accept"] = "application/json, text/event-stream"
 
-        is_sse_init = request.method == "GET" and "text/event-stream" in request.headers.get("accept", "").lower()
-        if is_sse_init:
+        is_get = request.method == "GET"
+        is_sse_init = is_get and "text/event-stream" in request.headers.get("accept", "").lower()
+        if is_get:
             if ep_cfg.transport == "streamable-http":
+                if not is_sse_init:
+                    return JSONResponse(
+                        {
+                            "jsonrpc": "2.0",
+                            "error": {
+                                "code": -32000,
+                                "message": "Use POST for Streamable HTTP JSON-RPC, or GET with Accept: text/event-stream for SSE."
+                            },
+                            "id": None
+                        },
+                        status_code=405,
+                    )
                 session_id = uuid4().hex
                 queue = asyncio.Queue()
-                self.active_sessions[session_id] = queue
+                self.active_sessions[session_id] = BridgeSession(path_prefix=path_prefix, queue=queue)
                 return StreamingResponse(
                     self.local_sse_generator(session_id, queue, path_prefix),
                     media_type="text/event-stream"
                 )
-            else:
+            if is_sse_init:
                 return StreamingResponse(
                     self.sse_proxy_generator(target_url, forward_headers, dict(request.query_params), path_prefix),
                     media_type="text/event-stream"
                 )
-        else:
+        if not is_get or (ep_cfg.transport != "streamable-http" and not is_sse_init):
             session_id = request.query_params.get("session_id")
             if request.method == "POST" and ep_cfg.transport == "streamable-http" and session_id:
-                if session_id not in self.active_sessions:
+                session = self.active_sessions.get(session_id)
+                if session is None:
                     return JSONResponse({"error": "Session not found"}, status_code=404)
-                queue = self.active_sessions[session_id]
+                if session.path_prefix != path_prefix:
+                    return JSONResponse({"error": "Session belongs to a different endpoint"}, status_code=409)
+                queue = session.queue
                 params = {k: v for k, v in request.query_params.items() if k != "session_id"}
-                forward_headers["Mcp-Session-Id"] = session_id
+                if session.remote_session_id:
+                    forward_headers["Mcp-Session-Id"] = session.remote_session_id
+                else:
+                    forward_headers.pop("Mcp-Session-Id", None)
+                    forward_headers.pop("mcp-session-id", None)
+                
+                # Set accept header to support both json and sse (required by Hugging Face and some others)
+                forward_headers["accept"] = "application/json, text/event-stream"
+                
                 try:
                     client = httpx.AsyncClient()
-                    req_body = await request.body()
+                    req_body = normalize_jsonrpc_request_body(await request.body())
                     response_stream = client.stream(
                         method="POST",
                         url=target_url,
@@ -277,11 +363,33 @@ class MCPRouter:
                         timeout=60.0
                     )
                     response = await response_stream.__aenter__()
+                    
+                    # Capture the remote session ID if returned in response headers
+                    resp_sid = response.headers.get("mcp-session-id") or response.headers.get("Mcp-Session-Id")
+                    if resp_sid:
+                        session.remote_session_id = resp_sid
+                        
                     async def process_response():
                         try:
-                            async for line in response.aiter_lines():
-                                filtered_line = filter_tools_response(line, ep_cfg.allowed_tools, ep_cfg.denied_tools)
-                                await queue.put(filtered_line)
+                            # Handle both raw JSON-RPC response (direct response mode) and SSE lines (server push mode)
+                            headers = getattr(response, "headers", None)
+                            if hasattr(headers, "get") and not type(headers).__name__.endswith("Mock"):
+                                content_type = str(headers.get("content-type", "")).lower()
+                            else:
+                                content_type = ""
+                                
+                            if "application/json" in content_type:
+                                body_bytes = await response.aread()
+                                body_str = body_bytes.decode("utf-8", errors="replace")
+                                filtered_body = filter_tools_response(body_str, ep_cfg.allowed_tools, ep_cfg.denied_tools)
+                                # Wrap direct JSON-RPC in an SSE message event so client parses it correctly
+                                await queue.put("event: message")
+                                await queue.put(f"data: {filtered_body}")
+                                await queue.put("")
+                            else:
+                                async for line in response.aiter_lines():
+                                    filtered_line = filter_tools_response(line, ep_cfg.allowed_tools, ep_cfg.denied_tools)
+                                    await queue.put(filtered_line)
                         except Exception as e:
                             logger.error(f"Error reading response from streamable-http backend: {e}")
                         finally:
@@ -295,7 +403,7 @@ class MCPRouter:
             else:
                 try:
                     client = httpx.AsyncClient()
-                    req_body = await request.body()
+                    req_body = normalize_jsonrpc_request_body(await request.body())
                     response_stream = client.stream(
                         method=request.method,
                         url=target_url,
@@ -306,8 +414,6 @@ class MCPRouter:
                     )
                     response = await response_stream.__aenter__()
                     
-                    resp_headers = {k: v for k, v in response.headers.items() if k.lower() not in exclude_headers}
-                    
                     content_type = response.headers.get("content-type", "")
                     if "application/json" in content_type.lower():
                         body_bytes = await response.aread()
@@ -315,6 +421,7 @@ class MCPRouter:
                         await client.aclose()
                         body_str = body_bytes.decode("utf-8", errors="replace")
                         filtered_body = filter_tools_response(body_str, ep_cfg.allowed_tools, ep_cfg.denied_tools)
+                        resp_headers = build_response_headers(response.headers, exclude_headers, body_was_decoded=True)
                         return Response(
                             content=filtered_body.encode("utf-8"),
                             status_code=response.status_code,
@@ -322,6 +429,7 @@ class MCPRouter:
                             media_type=content_type
                         )
                     elif "event-stream" in content_type.lower():
+                        resp_headers = build_response_headers(response.headers, exclude_headers)
                         async def sse_content_generator():
                             try:
                                 async for line in response.aiter_lines():
@@ -338,6 +446,7 @@ class MCPRouter:
                             media_type=content_type
                         )
                     else:
+                        resp_headers = build_response_headers(response.headers, exclude_headers)
                         async def content_generator():
                             try:
                                 async for chunk in response.aiter_bytes():
@@ -371,9 +480,7 @@ async def lifespan(app: Starlette):
     # Perform initial configuration load
     if os.path.exists(CONFIG_PATH):
         try:
-            with open(CONFIG_PATH, "r") as f:
-                data = yaml.safe_load(f) or {}
-            initial_config = RouterConfig.model_validate(data)
+            initial_config = load_router_config(CONFIG_PATH)
             router.apply_configuration(initial_config)
         except Exception as e:
             logger.error(f"Failed to apply initial configuration: {e}")

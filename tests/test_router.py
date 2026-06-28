@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import sys
 import pytest
@@ -8,9 +9,9 @@ from starlette.testclient import TestClient
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from mcp_router.core.config_loader import EndpointConfig, RouterConfig
+from mcp_router.core.config_loader import EndpointConfig, RouterConfig, expand_env_vars
 from mcp_router.core.process_manager import ProcessManager
-from mcp_router.server import app, router
+from mcp_router.server import app, router, BridgeSession
 
 # --- Config Loader Tests ---
 
@@ -107,6 +108,77 @@ def test_config_missing_managed_cli_url():
     with pytest.raises(ValueError, match="url is required for managed_cli mode"):
         RouterConfig.model_validate(data)
 
+def test_config_expands_environment_variables(monkeypatch):
+    monkeypatch.setenv("TEST_HF_TOKEN", "hf_test_token")
+    data = {
+        "endpoints": [
+            {
+                "path": "huggingface",
+                "mode": "remote",
+                "url": "https://huggingface.co/mcp",
+                "summary": "HuggingFace API",
+                "headers": {
+                    "Authorization": "Bearer ${TEST_HF_TOKEN}",
+                    "X-Default": "${MISSING_HEADER:-fallback}"
+                }
+            }
+        ]
+    }
+
+    expanded = expand_env_vars(data)
+    cfg = RouterConfig.model_validate(expanded)
+
+    assert cfg.endpoints[0].headers == {
+        "Authorization": "Bearer hf_test_token",
+        "X-Default": "fallback"
+    }
+
+def test_config_env_expansion_requires_missing_variables(monkeypatch):
+    monkeypatch.delenv("MISSING_HF_TOKEN", raising=False)
+
+    with pytest.raises(ValueError, match="MISSING_HF_TOKEN"):
+        expand_env_vars({"headers": {"Authorization": "Bearer ${MISSING_HF_TOKEN}"}})
+
+def test_config_omits_empty_authorization_header(monkeypatch):
+    monkeypatch.delenv("OPTIONAL_HF_TOKEN", raising=False)
+    data = {
+        "endpoints": [
+            {
+                "path": "huggingface",
+                "mode": "remote",
+                "url": "https://huggingface.co/mcp",
+                "summary": "HuggingFace API",
+                "headers": {
+                    "Authorization": "Bearer ${OPTIONAL_HF_TOKEN:-}"
+                }
+            }
+        ]
+    }
+
+    cfg = RouterConfig.model_validate(expand_env_vars(data))
+
+    assert cfg.endpoints[0].headers is None
+
+def test_config_normalizes_duplicate_bearer_authorization(monkeypatch):
+    monkeypatch.setenv("HF_TOKEN_WITH_SCHEME", "Bearer hf_test_token")
+    data = {
+        "endpoints": [
+            {
+                "path": "huggingface",
+                "mode": "remote",
+                "url": "https://huggingface.co/mcp",
+                "summary": "HuggingFace API",
+                "headers": {
+                    "Authorization": "Bearer ${HF_TOKEN_WITH_SCHEME}"
+                }
+            }
+        ]
+    }
+
+    cfg = RouterConfig.model_validate(expand_env_vars(data))
+
+    assert cfg.endpoints[0].headers == {"Authorization": "Bearer hf_test_token"}
+
 # --- Process Manager Tests ---
 
 @pytest.mark.asyncio
@@ -178,62 +250,94 @@ def test_not_found_route():
 
 
 @pytest.mark.asyncio
-async def test_streamable_http_bridge():
+async def test_streamable_http_plain_get_returns_json_not_upstream_html():
+    from starlette.requests import Request
+
     router._configs = {
-        "weather": EndpointConfig(
-            path="weather",
+        "huggingface": EndpointConfig(
+            path="huggingface",
             mode="remote",
-            url="http://api.weather.com/mcp",
-            summary="Weather summary",
+            url="https://huggingface.co/mcp",
+            summary="HuggingFace remote server",
             transport="streamable-http"
         )
     }
-    
-    import httpx
-    from httpx import AsyncClient
-    transport = httpx.ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        # 1. Establish GET SSE connection and read the endpoint registration message
-        async with client.stream("GET", "/weather", headers={"Accept": "text/event-stream"}) as sse_res:
-            assert sse_res.status_code == 200
-            
-            lines_iter = sse_res.aiter_lines()
-            l1 = await anext(lines_iter)
-            l2 = await anext(lines_iter)
-            
-            assert "event: endpoint" in l1
-            assert "data: /weather?session_id=" in l2
-            session_id = l2.split("session_id=")[1]
-            
-            # 2. Prepare the background POST task that simulates remote backend response streaming
-            async def run_post(sid):
-                mock_response = MagicMock()
-                mock_response.status_code = 200
-                async def mock_aiter_lines():
-                    yield "event: message"
-                    yield "data: {\"result\":\"cloudy\"}"
-                    yield ""
-                mock_response.aiter_lines = mock_aiter_lines
-                
-                mock_stream = MagicMock()
-                mock_stream.__aenter__ = AsyncMock(return_value=mock_response)
-                mock_stream.__aexit__ = AsyncMock(return_value=None)
-                
-                with patch("httpx.AsyncClient.stream", return_value=mock_stream):
-                    post_res = await client.post(f"/weather?session_id={sid}", json={"jsonrpc":"2.0","id":1,"method":"foo"})
-                    assert post_res.status_code == 202
-                    assert post_res.text == "Accepted"
-            
-            post_task = asyncio.create_task(run_post(session_id))
-            
-            # 3. Read the bridged response message on the persistent GET SSE stream
-            l3 = await anext(lines_iter)
-            l4 = await anext(lines_iter)
-            
-            assert "event: message" in l3
-            assert "data: {\"result\":\"cloudy\"}" in l4
-            
-            await post_task
+    router.active_sessions.clear()
+
+    mock_req = MagicMock(spec=Request)
+    mock_req.method = "GET"
+    mock_req.path_params = {"path_prefix": "huggingface"}
+    mock_req.url.path = "/huggingface"
+    mock_req.headers = {"accept": "*/*"}
+    mock_req.query_params = {}
+
+    with patch("httpx.AsyncClient.stream") as mock_stream:
+        response = await router.catch_all_proxy(mock_req)
+
+    assert response.status_code == 405
+    assert response.media_type == "application/json"
+    assert b"Streamable HTTP" in response.body
+    assert router.active_sessions == {}
+    mock_stream.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_sse_get_opens_local_sse_bridge():
+    from starlette.requests import Request
+
+    router._configs = {
+        "huggingface": EndpointConfig(
+            path="huggingface",
+            mode="remote",
+            url="https://huggingface.co/mcp",
+            summary="HuggingFace remote server",
+            transport="streamable-http"
+        )
+    }
+    router.active_sessions.clear()
+
+    mock_req = MagicMock(spec=Request)
+    mock_req.method = "GET"
+    mock_req.path_params = {"path_prefix": "huggingface"}
+    mock_req.url.path = "/huggingface"
+    mock_req.headers = {"accept": "text/event-stream"}
+    mock_req.query_params = {}
+
+    with patch("httpx.AsyncClient.stream") as mock_stream:
+        response = await router.catch_all_proxy(mock_req)
+
+    assert response.status_code == 200
+    assert response.media_type == "text/event-stream"
+    assert len(router.active_sessions) == 1
+    session = next(iter(router.active_sessions.values()))
+    assert session.path_prefix == "huggingface"
+    mock_stream.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_bridge():
+    session_id = "local-session-123"
+    queue = asyncio.Queue()
+    router.active_sessions.clear()
+    router.active_sessions[session_id] = BridgeSession(path_prefix="weather", queue=queue)
+
+    stream = router.local_sse_generator(session_id, queue, "weather")
+    try:
+        endpoint_event = (await anext(stream)).decode("utf-8")
+        assert "event: endpoint" in endpoint_event
+        assert f"data: /weather?session_id={session_id}" in endpoint_event
+
+        await queue.put("event: message")
+        await queue.put('data: {"result":"cloudy"}')
+
+        event_line = (await anext(stream)).decode("utf-8").strip()
+        data_line = (await anext(stream)).decode("utf-8").strip()
+        assert event_line == "event: message"
+        assert data_line == 'data: {"result":"cloudy"}'
+    finally:
+        await stream.aclose()
+
+    assert session_id not in router.active_sessions
 
 
 # --- Tool Filtering Tests ---
@@ -295,3 +399,490 @@ def test_filter_tools_response_json():
     assert data["result"]["tools"][0]["name"] == "toolB"
 
 
+def test_config_with_headers():
+    data = {
+        "endpoints": [
+            {
+                "path": "weather",
+                "mode": "remote",
+                "url": "http://api.weather.com",
+                "summary": "Weather API",
+                "headers": {
+                    "Authorization": "Bearer mytoken",
+                    "X-Custom-Header": "value"
+                }
+            }
+        ]
+    }
+    cfg = RouterConfig.model_validate(data)
+    assert len(cfg.endpoints) == 1
+    assert cfg.endpoints[0].headers == {
+        "Authorization": "Bearer mytoken",
+        "X-Custom-Header": "value"
+    }
+
+
+@pytest.mark.asyncio
+async def test_proxy_headers_forwarding():
+    router._configs = {
+        "weather": EndpointConfig(
+            path="weather",
+            mode="remote",
+            url="http://api.weather.com/mcp",
+            summary="Weather summary",
+            headers={"X-Custom-Auth": "secret-token", "X-Override": "router-value"}
+        )
+    }
+
+    import httpx
+    from httpx import AsyncClient
+    transport = httpx.ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = httpx.Headers({"content-type": "application/json"})
+        mock_response.aread = AsyncMock(return_value=b'{"jsonrpc":"2.0","result":{"tools":[]}}')
+        
+        mock_stream = MagicMock()
+        mock_stream.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_stream.__aexit__ = AsyncMock(return_value=None)
+        
+        with patch("httpx.AsyncClient.stream", return_value=mock_stream) as mock_stream_call:
+            response = await client.post(
+                "/weather/tools/list",
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                headers={"X-Override": "client-value", "X-Client-Header": "only-client"}
+            )
+            assert response.status_code == 200
+            
+            mock_stream_call.assert_called_once()
+            called_kwargs = mock_stream_call.call_args[1]
+            called_headers = called_kwargs.get("headers")
+            
+            # Custom auth header from config must be present
+            assert called_headers.get("x-custom-auth") == "secret-token" or called_headers.get("X-Custom-Auth") == "secret-token"
+            # Override header must have the value from the config
+            assert called_headers.get("x-override") == "router-value" or called_headers.get("X-Override") == "router-value"
+            # Client header must still be present
+            assert called_headers.get("x-client-header") == "only-client" or called_headers.get("X-Client-Header") == "only-client"
+
+
+@pytest.mark.asyncio
+async def test_proxy_strips_encoding_headers_from_decoded_json_response():
+    router._configs = {
+        "weather": EndpointConfig(
+            path="weather",
+            mode="remote",
+            url="http://api.weather.com/mcp",
+            summary="Weather summary"
+        )
+    }
+
+    import httpx
+    from httpx import AsyncClient
+    transport = httpx.ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = httpx.Headers({
+            "content-type": "application/json",
+            "content-encoding": "gzip",
+            "content-length": "9999",
+            "x-upstream": "kept"
+        })
+        mock_response.aread = AsyncMock(return_value=b'{"jsonrpc":"2.0","result":{"tools":[]}}')
+
+        mock_stream = MagicMock()
+        mock_stream.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_stream.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("httpx.AsyncClient.stream", return_value=mock_stream):
+            response = await client.post(
+                "/weather/tools/list",
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+            )
+
+    assert response.status_code == 200
+    assert response.headers.get("content-encoding") is None
+    assert response.headers.get("content-length") != "9999"
+    assert response.headers.get("x-upstream") == "kept"
+    assert response.json()["result"]["tools"] == []
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_direct_post_accepts_json_only_clients():
+    router._configs = {
+        "huggingface": EndpointConfig(
+            path="huggingface",
+            mode="remote",
+            url="https://huggingface.co/mcp",
+            summary="HuggingFace remote server",
+            transport="streamable-http"
+        )
+    }
+
+    import httpx
+    from httpx import AsyncClient
+    transport = httpx.ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = httpx.Headers({"content-type": "application/json"})
+        mock_response.aread = AsyncMock(return_value=b'{"jsonrpc":"2.0","id":1,"result":{}}')
+
+        mock_stream = MagicMock()
+        mock_stream.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_stream.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("httpx.AsyncClient.stream", return_value=mock_stream) as mock_stream_call:
+            response = await client.post(
+                "/huggingface",
+                json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                headers={"Accept": "application/json"}
+            )
+
+    assert response.status_code == 200
+    called_headers = mock_stream_call.call_args[1]["headers"]
+    assert called_headers["accept"] == "application/json, text/event-stream"
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_direct_post_adds_missing_jsonrpc_version():
+    router._configs = {
+        "huggingface": EndpointConfig(
+            path="huggingface",
+            mode="remote",
+            url="https://huggingface.co/mcp",
+            summary="HuggingFace remote server",
+            transport="streamable-http"
+        )
+    }
+
+    import httpx
+    from httpx import AsyncClient
+    transport = httpx.ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = httpx.Headers({"content-type": "application/json"})
+        mock_response.aread = AsyncMock(return_value=b'{"jsonrpc":"2.0","id":1,"result":{}}')
+
+        mock_stream = MagicMock()
+        mock_stream.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_stream.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("httpx.AsyncClient.stream", return_value=mock_stream) as mock_stream_call:
+            response = await client.post(
+                "/huggingface",
+                json={"id": 1, "method": "initialize", "params": {}},
+                headers={"Accept": "application/json"}
+            )
+
+    assert response.status_code == 200
+    forwarded = json.loads(mock_stream_call.call_args[1]["content"])
+    assert forwarded == {"id": 1, "method": "initialize", "params": {}, "jsonrpc": "2.0"}
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_direct_post_adds_missing_jsonrpc_version_to_batch_items():
+    router._configs = {
+        "huggingface": EndpointConfig(
+            path="huggingface",
+            mode="remote",
+            url="https://huggingface.co/mcp",
+            summary="HuggingFace remote server",
+            transport="streamable-http"
+        )
+    }
+
+    import httpx
+    from httpx import AsyncClient
+    transport = httpx.ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = httpx.Headers({"content-type": "application/json"})
+        mock_response.aread = AsyncMock(return_value=b'{"jsonrpc":"2.0","id":1,"result":{}}')
+
+        mock_stream = MagicMock()
+        mock_stream.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_stream.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("httpx.AsyncClient.stream", return_value=mock_stream) as mock_stream_call:
+            response = await client.post(
+                "/huggingface",
+                json=[
+                    {"id": 1, "method": "tools/list", "params": {}},
+                    {"jsonrpc": "2.0", "id": 2, "method": "prompts/list", "params": {}},
+                    {"not": "rpc"}
+                ],
+                headers={"Accept": "application/json"}
+            )
+
+    assert response.status_code == 200
+    forwarded = json.loads(mock_stream_call.call_args[1]["content"])
+    assert forwarded[0]["jsonrpc"] == "2.0"
+    assert forwarded[1]["jsonrpc"] == "2.0"
+    assert forwarded[2] == {"not": "rpc"}
+
+
+@pytest.mark.asyncio
+async def test_sse_message_post_uses_upstream_message_path():
+    router._configs = {
+        "crawl4ai": EndpointConfig(
+            path="crawl4ai",
+            mode="remote",
+            url="http://127.0.0.1:11235/mcp/sse",
+            summary="Crawl4AI",
+            transport="sse",
+            headers={"Authorization": "Bearer token"}
+        )
+    }
+
+    import httpx
+    from httpx import AsyncClient
+    transport = httpx.ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = httpx.Headers({"content-type": "application/json"})
+        mock_response.aread = AsyncMock(return_value=b'{"jsonrpc":"2.0","id":1,"result":{}}')
+
+        mock_stream = MagicMock()
+        mock_stream.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_stream.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("httpx.AsyncClient.stream", return_value=mock_stream) as mock_stream_call:
+            response = await client.post(
+                "/crawl4ai/mcp/messages/?session_id=abc",
+                json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                headers={"Accept": "application/json"}
+            )
+
+    assert response.status_code == 200
+    assert mock_stream_call.call_args[1]["url"] == "http://127.0.0.1:11235/mcp/messages/"
+    assert mock_stream_call.call_args[1]["headers"]["Authorization"] == "Bearer token"
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_direct_response_json():
+    import httpx
+    from starlette.requests import Request
+    # Configure endpoint
+    router._configs = {
+        "huggingface": EndpointConfig(
+            path="huggingface",
+            mode="remote",
+            url="https://huggingface.co/mcp",
+            summary="HuggingFace remote server",
+            transport="streamable-http"
+        )
+    }
+    router.active_sessions.clear()
+
+    # Create a local session queue to simulate active SSE connection
+    local_session_id = "local-session-123"
+    queue = asyncio.Queue()
+    router.active_sessions[local_session_id] = BridgeSession(path_prefix="huggingface", queue=queue)
+
+    # 1. Test POST request for 'initialize'
+    # This should:
+    # - Call the remote server WITHOUT Mcp-Session-Id header (since it's not mapped yet)
+    # - Set Accept header to "application/json, text/event-stream"
+    # - Capture and map the remote session ID returned in response headers
+    # - Wrap direct JSON response into SSE message event on the queue
+    mock_init_resp = MagicMock()
+    mock_init_resp.status_code = 200
+    mock_init_resp.headers = httpx.Headers({
+        "content-type": "application/json",
+        "mcp-session-id": "remote-session-456"
+    })
+    mock_init_resp.aread = AsyncMock(return_value=b'{"jsonrpc":"2.0","result":{"protocolVersion":"2024-11-05"},"id":1}')
+    
+    mock_init_stream = MagicMock()
+    mock_init_stream.__aenter__ = AsyncMock(return_value=mock_init_resp)
+    mock_init_stream.__aexit__ = AsyncMock(return_value=None)
+
+    mock_req_init = MagicMock(spec=Request)
+    mock_req_init.method = "POST"
+    mock_req_init.path_params = {"path_prefix": "huggingface"}
+    mock_req_init.url.path = "/huggingface/initialize"
+    mock_req_init.headers = {"accept": "application/json", "content-type": "application/json"}
+    mock_req_init.query_params = {"session_id": local_session_id}
+    mock_req_init.body = AsyncMock(return_value=b'{"jsonrpc":"2.0","id":1,"method":"initialize"}')
+
+    with patch("httpx.AsyncClient.stream", return_value=mock_init_stream) as mock_stream_call:
+        response = await router.catch_all_proxy(mock_req_init)
+        assert response.status_code == 202
+        assert response.body == b"Accepted"
+        
+        # Verify call arguments
+        mock_stream_call.assert_called_once()
+        called_kwargs = mock_stream_call.call_args[1]
+        assert "Mcp-Session-Id" not in called_kwargs["headers"]
+        assert called_kwargs["headers"].get("accept") == "application/json, text/event-stream"
+        
+        # Verify remote session ID was mapped
+        assert router.active_sessions[local_session_id].remote_session_id == "remote-session-456"
+        
+        # Verify the wrapped SSE events in the queue
+        e1 = await queue.get()
+        e2 = await queue.get()
+        e3 = await queue.get()
+        assert e1 == "event: message"
+        assert e2 == 'data: {"jsonrpc":"2.0","result":{"protocolVersion":"2024-11-05"},"id":1}'
+        assert e3 == ""
+        assert queue.empty()
+
+    # 2. Test subsequent POST request for 'tools/list'
+    # This should:
+    # - Call the remote server WITH Mcp-Session-Id header (using the mapped session ID)
+    # - Set Accept header to "application/json, text/event-stream"
+    # - Wrap direct JSON response into SSE message event on the queue
+    mock_tools_resp = MagicMock()
+    mock_tools_resp.status_code = 200
+    mock_tools_resp.headers = httpx.Headers({"content-type": "application/json"})
+    mock_tools_resp.aread = AsyncMock(return_value=b'{"jsonrpc":"2.0","result":{"tools":[]},"id":2}')
+    
+    mock_tools_stream = MagicMock()
+    mock_tools_stream.__aenter__ = AsyncMock(return_value=mock_tools_resp)
+    mock_tools_stream.__aexit__ = AsyncMock(return_value=None)
+
+    mock_req_tools = MagicMock(spec=Request)
+    mock_req_tools.method = "POST"
+    mock_req_tools.path_params = {"path_prefix": "huggingface"}
+    mock_req_tools.url.path = "/huggingface/tools/list"
+    mock_req_tools.headers = {"accept": "application/json", "content-type": "application/json"}
+    mock_req_tools.query_params = {"session_id": local_session_id}
+    mock_req_tools.body = AsyncMock(return_value=b'{"jsonrpc":"2.0","id":2,"method":"tools/list"}')
+
+    with patch("httpx.AsyncClient.stream", return_value=mock_tools_stream) as mock_stream_call2:
+        response2 = await router.catch_all_proxy(mock_req_tools)
+        assert response2.status_code == 202
+        assert response2.body == b"Accepted"
+        
+        # Verify call arguments
+        mock_stream_call2.assert_called_once()
+        called_kwargs2 = mock_stream_call2.call_args[1]
+        assert called_kwargs2["headers"].get("Mcp-Session-Id") == "remote-session-456"
+        assert called_kwargs2["headers"].get("accept") == "application/json, text/event-stream"
+        
+        # Verify the wrapped SSE events in the queue
+        e4 = await queue.get()
+        e5 = await queue.get()
+        e6 = await queue.get()
+        assert e4 == "event: message"
+        assert e5 == 'data: {"jsonrpc":"2.0","result":{"tools":[]},"id":2}'
+        assert e6 == ""
+        assert queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_rejects_session_for_different_endpoint():
+    from starlette.requests import Request
+
+    router._configs = {
+        "weather": EndpointConfig(
+            path="weather",
+            mode="remote",
+            url="http://api.weather.com/mcp",
+            summary="Weather summary",
+            transport="streamable-http"
+        ),
+        "huggingface": EndpointConfig(
+            path="huggingface",
+            mode="remote",
+            url="https://huggingface.co/mcp",
+            summary="HuggingFace remote server",
+            transport="streamable-http"
+        )
+    }
+    router.active_sessions.clear()
+    local_session_id = "weather-session"
+    router.active_sessions[local_session_id] = BridgeSession(
+        path_prefix="weather",
+        queue=asyncio.Queue(),
+        remote_session_id="remote-weather-session"
+    )
+
+    mock_req = MagicMock(spec=Request)
+    mock_req.method = "POST"
+    mock_req.path_params = {"path_prefix": "huggingface"}
+    mock_req.url.path = "/huggingface/tools/list"
+    mock_req.headers = {"accept": "application/json", "content-type": "application/json"}
+    mock_req.query_params = {"session_id": local_session_id}
+    mock_req.body = AsyncMock(return_value=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
+
+    with patch("httpx.AsyncClient.stream") as mock_stream:
+        response = await router.catch_all_proxy(mock_req)
+
+    assert response.status_code == 409
+    assert b"different endpoint" in response.body
+    mock_stream.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_apply_configuration_drops_sessions_for_removed_or_changed_endpoint():
+    router._configs = {
+        "weather": EndpointConfig(
+            path="weather",
+            mode="remote",
+            url="http://api.weather.com/mcp",
+            summary="Weather summary",
+            transport="streamable-http"
+        ),
+        "huggingface": EndpointConfig(
+            path="huggingface",
+            mode="remote",
+            url="https://huggingface.co/mcp",
+            summary="HuggingFace remote server",
+            transport="streamable-http"
+        ),
+        "files": EndpointConfig(
+            path="files",
+            mode="remote",
+            url="http://files.example.com/mcp",
+            summary="Files remote server",
+            transport="streamable-http"
+        )
+    }
+    router.active_sessions.clear()
+    router.active_sessions["weather-session"] = BridgeSession(
+        path_prefix="weather",
+        queue=asyncio.Queue(),
+        remote_session_id="remote-weather-session"
+    )
+    router.active_sessions["hf-session"] = BridgeSession(
+        path_prefix="huggingface",
+        queue=asyncio.Queue(),
+        remote_session_id="remote-hf-session"
+    )
+    router.active_sessions["files-session"] = BridgeSession(
+        path_prefix="files",
+        queue=asyncio.Queue(),
+        remote_session_id="remote-files-session"
+    )
+
+    new_config = RouterConfig.model_validate({
+        "endpoints": [
+            {
+                "path": "weather",
+                "mode": "remote",
+                "url": "http://api.weather.com/v2/mcp",
+                "summary": "Updated weather summary"
+            },
+            {
+                "path": "huggingface",
+                "mode": "remote",
+                "url": "https://huggingface.co/mcp",
+                "summary": "HuggingFace remote server"
+            }
+        ]
+    })
+
+    router.apply_configuration(new_config)
+    await asyncio.sleep(0)
+
+    assert "weather-session" not in router.active_sessions
+    assert "files-session" not in router.active_sessions
+    assert "hf-session" in router.active_sessions

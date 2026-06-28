@@ -1,11 +1,37 @@
 import asyncio
 import os
 import logging
+import re
 from typing import List, Optional, Callable
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
 logger = logging.getLogger(__name__)
+ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
+def expand_env_vars(value):
+    if isinstance(value, str):
+        def replace(match: re.Match) -> str:
+            name = match.group(1)
+            default = match.group(2)
+            env_value = os.environ.get(name)
+            if env_value is not None:
+                return env_value
+            if default is not None:
+                return default
+            raise ValueError(f"Environment variable '{name}' is required but not set")
+
+        return ENV_VAR_PATTERN.sub(replace, value)
+    if isinstance(value, list):
+        return [expand_env_vars(item) for item in value]
+    if isinstance(value, dict):
+        return {key: expand_env_vars(item) for key, item in value.items()}
+    return value
+
+def load_router_config(config_path: str) -> "RouterConfig":
+    with open(config_path, "r") as f:
+        data = yaml.safe_load(f) or {}
+    return RouterConfig.model_validate(expand_env_vars(data))
 
 class EndpointConfig(BaseModel):
     path: str
@@ -19,10 +45,25 @@ class EndpointConfig(BaseModel):
     transport: Optional[str] = None
     allowed_tools: Optional[List[str]] = None
     denied_tools: Optional[List[str]] = None
+    headers: Optional[dict[str, str]] = None
 
     @model_validator(mode="after")
     def validate_mode_requirements(self) -> "EndpointConfig":
         """Validate configuration requirements based on the mode."""
+        if self.headers:
+            cleaned_headers = {}
+            for key, value in self.headers.items():
+                normalized_value = value.strip()
+                if key.lower() == "authorization":
+                    lower_value = normalized_value.lower()
+                    if lower_value == "bearer":
+                        continue
+                    if lower_value.startswith("bearer bearer "):
+                        normalized_value = "Bearer " + normalized_value.split(None, 2)[2]
+                if normalized_value:
+                    cleaned_headers[key] = normalized_value
+            self.headers = cleaned_headers or None
+
         if self.allowed_tools is not None and self.denied_tools is not None:
             self.denied_tools = None
 
@@ -115,9 +156,7 @@ class ConfigWatcher:
                         self._last_mtime = mtime
                         logger.info(f"Detected change in configuration: {self.config_path}")
                         try:
-                            with open(self.config_path, "r") as f:
-                                data = yaml.safe_load(f) or {}
-                            new_config = RouterConfig.model_validate(data)
+                            new_config = load_router_config(self.config_path)
                             if asyncio.iscoroutinefunction(self.callback):
                                 await self.callback(new_config)
                             else:
