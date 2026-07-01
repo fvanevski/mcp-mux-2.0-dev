@@ -320,19 +320,32 @@ class MCPRouter:
                         },
                         status_code=405,
                     )
-                session_id = uuid4().hex
-                queue = asyncio.Queue()
-                self.active_sessions[session_id] = BridgeSession(path_prefix=path_prefix, queue=queue)
-                return StreamingResponse(
-                    self.local_sse_generator(session_id, queue, path_prefix),
-                    media_type="text/event-stream"
-                )
-            if is_sse_init:
+                if ep_cfg.legacy_sse_bridge:
+                    session_id = uuid4().hex
+                    queue = asyncio.Queue()
+                    self.active_sessions[session_id] = BridgeSession(path_prefix=path_prefix, queue=queue)
+                    headers = {
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no",
+                    }
+                    return StreamingResponse(
+                        self.local_sse_generator(session_id, queue, path_prefix),
+                        media_type="text/event-stream",
+                        headers=headers
+                    )
+            if ep_cfg.transport != "streamable-http" and is_sse_init:
+                headers = {
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                }
                 return StreamingResponse(
                     self.sse_proxy_generator(target_url, forward_headers, dict(request.query_params), path_prefix),
-                    media_type="text/event-stream"
+                    media_type="text/event-stream",
+                    headers=headers
                 )
-        if not is_get or (ep_cfg.transport != "streamable-http" and not is_sse_init):
+        if not is_get or (ep_cfg.transport == "streamable-http" and is_sse_init) or (ep_cfg.transport != "streamable-http" and not is_sse_init):
             session_id = request.query_params.get("session_id")
             if request.method == "POST" and ep_cfg.transport == "streamable-http" and session_id:
                 session = self.active_sessions.get(session_id)
@@ -430,6 +443,12 @@ class MCPRouter:
                         )
                     elif "event-stream" in content_type.lower():
                         resp_headers = build_response_headers(response.headers, exclude_headers)
+                        # Ensure SSE headers are set to prevent proxy buffering
+                        resp_headers.update({
+                            "Cache-Control": "no-cache",
+                            "Connection": "keep-alive",
+                            "X-Accel-Buffering": "no",
+                        })
                         async def sse_content_generator():
                             try:
                                 async for line in response.aiter_lines():

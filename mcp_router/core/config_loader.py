@@ -43,6 +43,7 @@ class EndpointConfig(BaseModel):
     summary: str
     timeout: int = 300  # Default to 300 seconds (5 minutes)
     transport: Optional[str] = None
+    legacy_sse_bridge: bool = False
     allowed_tools: Optional[List[str]] = None
     denied_tools: Optional[List[str]] = None
     headers: Optional[dict[str, str]] = None

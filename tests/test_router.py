@@ -4,7 +4,6 @@ import os
 import sys
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from starlette.testclient import TestClient
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -221,7 +220,8 @@ async def test_process_manager_lifecycle():
 
 # --- Routes & App Tests ---
 
-def test_summary_route():
+@pytest.mark.asyncio
+async def test_summary_route():
     router._configs = {
         "weather": EndpointConfig(
             path="weather",
@@ -231,8 +231,12 @@ def test_summary_route():
         )
     }
 
-    client = TestClient(app)
-    response = client.get("/summary")
+    import httpx
+    from httpx import AsyncClient
+    transport = httpx.ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/summary")
+
     assert response.status_code == 200
     
     data = response.json()
@@ -242,9 +246,14 @@ def test_summary_route():
     assert data["endpoints"][0]["mode"] == "remote"
     assert data["endpoints"][0]["summary"] == "Weather summary"
 
-def test_not_found_route():
-    client = TestClient(app)
-    response = client.get("/nonexistent")
+@pytest.mark.asyncio
+async def test_not_found_route():
+    import httpx
+    from httpx import AsyncClient
+    transport = httpx.ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/nonexistent")
+
     assert response.status_code == 404
     assert "configured" in response.json()["error"]
 
@@ -282,7 +291,7 @@ async def test_streamable_http_plain_get_returns_json_not_upstream_html():
 
 
 @pytest.mark.asyncio
-async def test_streamable_http_sse_get_opens_local_sse_bridge():
+async def test_streamable_http_sse_get_preserves_upstream_streamable_http():
     from starlette.requests import Request
 
     router._configs = {
@@ -292,6 +301,51 @@ async def test_streamable_http_sse_get_opens_local_sse_bridge():
             url="https://huggingface.co/mcp",
             summary="HuggingFace remote server",
             transport="streamable-http"
+        )
+    }
+    router.active_sessions.clear()
+
+    mock_req = MagicMock(spec=Request)
+    mock_req.method = "GET"
+    mock_req.path_params = {"path_prefix": "huggingface"}
+    mock_req.url.path = "/huggingface"
+    mock_req.headers = {"accept": "text/event-stream"}
+    mock_req.query_params = {}
+    mock_req.body = AsyncMock(return_value=b"")
+
+    import httpx
+    mock_response = MagicMock()
+    mock_response.status_code = 405
+    mock_response.headers = httpx.Headers({"content-type": "application/json"})
+    mock_response.aread = AsyncMock(return_value=b'{"error":"method not allowed"}')
+
+    mock_stream = MagicMock()
+    mock_stream.__aenter__ = AsyncMock(return_value=mock_response)
+    mock_stream.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("httpx.AsyncClient.stream", return_value=mock_stream) as mock_stream_call:
+        response = await router.catch_all_proxy(mock_req)
+
+    assert response.status_code == 405
+    assert response.media_type == "application/json"
+    assert router.active_sessions == {}
+    mock_stream_call.assert_called_once()
+    assert mock_stream_call.call_args[1]["method"] == "GET"
+    assert mock_stream_call.call_args[1]["url"] == "https://huggingface.co/mcp"
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_sse_get_opens_local_sse_bridge_when_enabled():
+    from starlette.requests import Request
+
+    router._configs = {
+        "huggingface": EndpointConfig(
+            path="huggingface",
+            mode="remote",
+            url="https://huggingface.co/mcp",
+            summary="HuggingFace remote server",
+            transport="streamable-http",
+            legacy_sse_bridge=True
         )
     }
     router.active_sessions.clear()

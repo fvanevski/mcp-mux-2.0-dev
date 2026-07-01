@@ -1,3 +1,5 @@
+# @format
+
 endpoints:
   - path: "web-search"
     mode: "remote"
@@ -14,13 +16,14 @@ endpoints:
       - "firecrawl_search"
       - "firecrawl_scrape"
 
-  - path: "crawl4ai"
-    mode: "remote"
-    url: "https://crawl4ai.garion.us/mcp/sse"
-    headers:
-      Authorization: "Bearer ${CRAWL4AI_API_TOKEN}"
-    summary: "Crawl4AI self-hosted web crawling and extraction tools"
-    timeout: 300 # Automatically shuts down after 300 seconds of inactivity
+  # - path: "crawl4ai"
+  #   mode: "remote"
+  #   url: "https://crawl4ai.garion.us/mcp/sse"
+  #   transport: "sse"
+  #   headers:
+  #     Authorization: "Bearer ${CRAWL4AI_API_TOKEN}"
+  #   summary: "Crawl4AI self-hosted web crawling and extraction tools"
+  #   timeout: 300 # Automatically shuts down after 300 seconds of inactivity
 
   - path: "huggingface"
     mode: "remote"
@@ -34,6 +37,6 @@ endpoints:
     mode: "remote"
     url: "https://mcp.context7.com/mcp"
     headers:
-      Authorization: "Bearer ${HF_TOKEN}"
+      Authorization: "Bearer ${CONTEXT7_TOKEN:-}"
     summary: "Context7 documentation lookup and indexing system"
     timeout: 300 # Automatically shuts down after 300 seconds of inactivity

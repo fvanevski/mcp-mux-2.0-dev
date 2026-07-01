@@ -13,9 +13,9 @@
   - **Remote**: Seamless proxying to external HTTP MCP endpoints.
   - **Managed CLI**: Native spawning of command-line tools (e.g., via `npx` or `uvx`).
 - 🧩 **Configurable Request Headers**: Adds endpoint-specific upstream headers, including tokens loaded from environment variables.
-- 🌉 **Local SSE-to-Streamable-HTTP Bridge**: Resolves transport mismatch when traditional SSE clients expect a `GET` request to establish a persistent channel but the upstream uses Streamable HTTP. The bridge creates a local SSE queue and routes client POST responses back onto that queue.
+- 🌉 **Optional Local SSE-to-Streamable-HTTP Bridge**: Streamable HTTP endpoints are proxied as Streamable HTTP by default. Endpoints can opt into a legacy SSE compatibility bridge when traditional SSE clients need a local `event: endpoint` flow.
 - ⚡ **Automatic Transport Auto-Detection**: Dynamically detects the backend transport mode (`streamable-http` vs `sse`) based on URL paths. Sub-servers with `/mcp` or `/mcp/` in their URL automatically default to `streamable-http`.
-- 🛡️ **Session Propagation & Isolation**: Tracks local bridge sessions per endpoint, maps upstream `Mcp-Session-Id` values to the correct local session, and rejects cross-endpoint session reuse.
+- 🛡️ **Session Propagation & Isolation**: For opt-in legacy bridge sessions, tracks local sessions per endpoint, maps upstream `Mcp-Session-Id` values to the correct local session, and rejects cross-endpoint session reuse.
 - 🤝 **Streamable HTTP Client Compatibility**: Normalizes upstream `Accept` headers for Streamable HTTP POST/DELETE requests and fills in missing JSON-RPC `"jsonrpc": "2.0"` fields for request bodies that otherwise look like JSON-RPC messages.
 - 🧼 **Decoded Response Header Safety**: Strips stale `Content-Encoding` and upstream `Content-Length` headers when the router reads and rebuilds JSON responses.
 - 📊 **Token-Saving Metadata Endpoint**: Registers a custom `/summary` route returning only namespaces and descriptions, shielding AI clients from schema bloat.
@@ -92,13 +92,19 @@ Configuration values support shell-style environment references before validatio
 | `summary` | String | Yes | Brief description of the sub-server, returned by `/summary`. |
 | `timeout` | Integer | No | Inactivity timeout in seconds for CLI mode (defaults to 300). |
 | `transport` | String | No | Transport mode (`sse` or `streamable-http`). Automatically detected if omitted. |
+| `legacy_sse_bridge` | Boolean | No | For `streamable-http` endpoints only. Defaults to `false`; set to `true` to expose the local legacy SSE bridge instead of preserving upstream GET+SSE behavior. |
 | `headers` | Mapping | No | Extra request headers forwarded upstream after environment expansion. |
 | `allowed_tools` | List of Strings | No | Allowlist of tool names. Only these tools are exposed. |
 | `denied_tools` | List of Strings | No | Denylist of tool names. These tools are excluded. (Ignored if `allowed_tools` is set). |
 
 ### Streamable HTTP Bridge Behavior
 
-For `streamable-http` endpoints, SSE clients can connect with:
+For `streamable-http` endpoints, the mux preserves the original transport by default:
+
+- `POST /<path>` forwards JSON-RPC messages to the upstream MCP endpoint.
+- `GET /<path>` with `Accept: text/event-stream` forwards to the upstream MCP endpoint and preserves the upstream response status and stream.
+
+To expose the legacy local SSE bridge, set `legacy_sse_bridge: true` on that endpoint. SSE clients can then connect with:
 
 ```bash
 curl -N -H 'Accept: text/event-stream' http://127.0.0.1:8012/huggingface
