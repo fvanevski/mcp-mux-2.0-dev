@@ -167,15 +167,27 @@ class ProcessManager:
             if remaining <= 0:
                 return False
             try:
-                _, writer = await asyncio.open_connection(host, port)
-                writer.close()
-                await writer.wait_closed()
-                return True
+                _, writer = await asyncio.wait_for(
+                    asyncio.open_connection(host, port),
+                    timeout=remaining,
+                )
+            except TimeoutError:
+                return False
             except (ConnectionRefusedError, OSError):
                 remaining = deadline - loop.time()
                 if remaining <= 0:
                     return False
                 await asyncio.sleep(min(interval, remaining))
+                continue
+
+            writer.close()
+            remaining = deadline - loop.time()
+            if remaining > 0:
+                try:
+                    await asyncio.wait_for(writer.wait_closed(), timeout=remaining)
+                except (OSError, TimeoutError):
+                    pass
+            return True
 
     async def cleanup(self):
         logger.info("Initiating cleanup of all active subprocesses.")

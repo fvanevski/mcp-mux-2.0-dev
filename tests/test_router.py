@@ -214,6 +214,26 @@ async def test_wait_for_port_caps_sleep_at_readiness_deadline(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_wait_for_port_bounds_connection_attempt_by_remaining_deadline(monkeypatch):
+    pm = ProcessManager()
+    wait_for_timeouts: list[float] = []
+
+    async def pending_connection(host: str, port: int):
+        await asyncio.Event().wait()
+
+    async def force_timeout(awaitable, *, timeout: float):
+        wait_for_timeouts.append(timeout)
+        awaitable.close()
+        raise TimeoutError
+
+    monkeypatch.setattr(asyncio, "open_connection", pending_connection)
+    monkeypatch.setattr(asyncio, "wait_for", force_timeout)
+
+    assert await pm._wait_for_port(3033, timeout=1.0, interval=30.0) is False
+    assert wait_for_timeouts == [1.0]
+
+
+@pytest.mark.asyncio
 async def test_process_manager_lifecycle():
     pm = ProcessManager()
     # Reset singleton internal state for testing
