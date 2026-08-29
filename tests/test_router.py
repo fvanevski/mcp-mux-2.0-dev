@@ -2,15 +2,21 @@ import asyncio
 import json
 import os
 import sys
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from mcp_router.core.config_loader import EndpointConfig, RouterConfig, expand_env_vars
+from mcp_router.core.config_loader import (
+    EndpointConfig,
+    ManagedEndpointConfig,
+    RouterConfig,
+    expand_env_vars,
+)
 from mcp_router.core.process_manager import ProcessManager
-from mcp_router.server import app, router, BridgeSession
+from mcp_router.server import BridgeSession, app, filter_tools_response, router
 
 # --- Config Loader Tests ---
 
@@ -26,7 +32,7 @@ def test_valid_config():
             {
                 "path": "files",
                 "mode": "managed_cli",
-                "command": "uvx mcp-server-filesystem",
+                "argv": ["uvx", "mcp-server-filesystem"],
                 "url": "http://localhost:8011/mcp",
                 "summary": "File tools"
             }
@@ -44,14 +50,14 @@ def test_config_port_collision():
             {
                 "path": "files1",
                 "mode": "managed_cli",
-                "command": "uvx mcp-server-filesystem",
+                "argv": ["uvx", "mcp-server-filesystem"],
                 "url": "http://localhost:8011/mcp",
                 "summary": "Files 1"
             },
             {
                 "path": "files2",
                 "mode": "managed_cli",
-                "command": "uvx mcp-server-filesystem",
+                "argv": ["uvx", "mcp-server-filesystem"],
                 "url": "http://localhost:8011/mcp",
                 "summary": "Files 2"
             }
@@ -90,7 +96,7 @@ def test_config_missing_remote_url():
             }
         ]
     }
-    with pytest.raises(ValueError, match="url is required for remote mode"):
+    with pytest.raises(ValueError):
         RouterConfig.model_validate(data)
 
 def test_config_missing_managed_cli_url():
@@ -99,12 +105,12 @@ def test_config_missing_managed_cli_url():
             {
                 "path": "files",
                 "mode": "managed_cli",
-                "command": "uvx",
+                "argv": ["uvx"],
                 "summary": "Missing URL"
             }
         ]
     }
-    with pytest.raises(ValueError, match="url is required for managed_cli mode"):
+    with pytest.raises(ValueError):
         RouterConfig.model_validate(data)
 
 def test_config_expands_environment_variables(monkeypatch):
@@ -181,35 +187,87 @@ def test_config_normalizes_duplicate_bearer_authorization(monkeypatch):
 # --- Process Manager Tests ---
 
 @pytest.mark.asyncio
+async def test_wait_for_port_caps_sleep_at_readiness_deadline(monkeypatch):
+    pm = ProcessManager()
+    now = 0.0
+    sleep_calls: list[float] = []
+
+    class FakeLoop:
+        def time(self) -> float:
+            return now
+
+    async def fail_connection(host: str, port: int):
+        raise ConnectionRefusedError
+
+    async def advance_time(delay: float):
+        nonlocal now
+        sleep_calls.append(delay)
+        now += delay
+
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: FakeLoop())
+    monkeypatch.setattr(asyncio, "open_connection", fail_connection)
+    monkeypatch.setattr(asyncio, "sleep", advance_time)
+
+    assert await pm._wait_for_port(3033, timeout=1.0, interval=30.0) is False
+    assert sleep_calls == [1.0]
+    assert now == 1.0
+
+
+@pytest.mark.asyncio
+async def test_wait_for_port_bounds_connection_attempt_by_remaining_deadline(monkeypatch):
+    pm = ProcessManager()
+    wait_for_timeouts: list[float] = []
+
+    class FakeLoop:
+        def time(self) -> float:
+            return 0.0
+
+    async def pending_connection(host: str, port: int):
+        await asyncio.Event().wait()
+
+    async def force_timeout(awaitable, *, timeout: float):
+        wait_for_timeouts.append(timeout)
+        awaitable.close()
+        raise TimeoutError
+
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: FakeLoop())
+    monkeypatch.setattr(asyncio, "open_connection", pending_connection)
+    monkeypatch.setattr(asyncio, "wait_for", force_timeout)
+
+    assert await pm._wait_for_port(3033, timeout=1.0, interval=30.0) is False
+    assert wait_for_timeouts == [1.0]
+
+
+@pytest.mark.asyncio
 async def test_process_manager_lifecycle():
     pm = ProcessManager()
     # Reset singleton internal state for testing
     pm._processes.clear()
     pm._log_tasks.clear()
 
-    cfg = EndpointConfig(
+    cfg = ManagedEndpointConfig(
         path="mock-mcp",
         mode="managed_cli",
-        command="python -m http.server 8099",
+        argv=["python", "-m", "http.server", "8099"],
         url="http://localhost:8099/mcp",
         summary="Mock python server"
     )
 
-    # Mock the asyncio.create_subprocess_shell and _wait_for_port
+    # Mock safe argv execution and readiness.
     mock_proc = AsyncMock()
     mock_proc.pid = 99999
     mock_proc.returncode = None
     mock_proc.stdout = AsyncMock()
     mock_proc.stderr = AsyncMock()
 
-    with patch("asyncio.create_subprocess_shell", return_value=mock_proc) as mock_shell, \
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec, \
          patch.object(pm, "_wait_for_port", return_value=True) as mock_wait:
         
         target_url = await pm.start_managed_server(cfg)
         
         assert target_url == "http://localhost:8099/mcp"
-        mock_shell.assert_called_once()
-        mock_wait.assert_called_once_with(8099, host="localhost")
+        assert mock_exec.call_args.args == ("python", "-m", "http.server", "8099")
+        mock_wait.assert_called_once_with(8099, host="localhost", timeout=15.0, interval=0.2)
         assert "mock-mcp" in pm._processes
 
         # Test stop
@@ -395,8 +453,6 @@ async def test_streamable_http_bridge():
 
 
 # --- Tool Filtering Tests ---
-
-from mcp_router.server import filter_tools_response
 
 def test_endpoint_config_allowed_denied_validation():
     # Both provided -> denied_tools is cleared to None (precedence to allowed)

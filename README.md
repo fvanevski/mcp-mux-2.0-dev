@@ -41,7 +41,8 @@ Normative refactor contracts are maintained in:
 
 - `docs/architecture/ADR-001-endpoint-gateway.md` — source-derived architecture and target endpoint boundary;
 - `docs/compatibility-matrix.md` — current/target/legacy claims and named compatibility scenarios;
-- `docs/validation.md` — deterministic CI/local-assessment authority and evidence contract.
+- `docs/validation.md` — deterministic CI/local-assessment authority and evidence contract;
+- `docs/configuration.md` — validated endpoint schema and migration contract.
 
 These files, together with the governing GitHub issues, supersede historical README prose when a refactor contract is more specific.
 
@@ -64,7 +65,15 @@ endpoints:
 
   - path: "firecrawl"
     mode: "managed_cli"
-    command: "export NVM_DIR=$HOME/.config/nvm && [ -s $NVM_DIR/nvm.sh ] && . $NVM_DIR/nvm.sh && HTTP_STREAMABLE_SERVER=true PORT=3033 HOST=localhost FIRECRAWL_API_URL=http://garion.us:3002 npx --yes firecrawl-mcp"
+    unsafe_shell_command: "export NVM_DIR=$HOME/.config/nvm && [ -s $NVM_DIR/nvm.sh ] && . $NVM_DIR/nvm.sh && npx --yes firecrawl-mcp"
+    env:
+      HTTP_STREAMABLE_SERVER: "true"
+      PORT: "3033"
+      HOST: "localhost"
+      FIRECRAWL_API_URL: "http://garion.us:3002"
+    readiness:
+      host: "localhost"
+      port: 3033
     url: "http://localhost:3033/mcp"
     summary: "Firecrawl Web Content Extraction Tool"
     timeout: 300  # Automatically shuts down after 300 seconds of inactivity
@@ -96,7 +105,11 @@ Configuration values support shell-style environment references before validatio
 | `path` | String | Yes | Unique namespace/route for the sub-server. |
 | `mode` | String | Yes | Spawning mode. `remote` and `managed_cli` are currently handled by the router. |
 | `url` | String | Yes (for remote/managed) | Target endpoint URL. |
-| `command` | String | Yes (for managed) | Command string to spawn the local server process. |
+| `argv` | List of Strings | One of `argv` / `unsafe_shell_command` (managed) | Preferred managed-process command; executed directly without a shell. |
+| `env` | Mapping | No | Environment variables added to a managed process. |
+| `cwd` | String | No | Working directory for a managed process. |
+| `readiness` | Mapping | No | Managed HTTP readiness `host`, `port`, `timeout`, and polling `interval`; host/port default from `url`. |
+| `unsafe_shell_command` | String | One of `argv` / `unsafe_shell_command` (managed) | Explicit shell escape hatch for commands that require shell syntax; avoid when structured `argv` is sufficient. |
 | `summary` | String | Yes | Brief description of the sub-server, returned by `/summary`. |
 | `timeout` | Integer | No | Inactivity timeout in seconds for CLI mode (defaults to 300). |
 | `transport` | String | No | Transport mode (`sse` or `streamable-http`). Automatically detected if omitted. |

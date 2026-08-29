@@ -1,20 +1,26 @@
-import os
 import asyncio
-import logging
-import time
-from uuid import uuid4
-from dataclasses import dataclass
-from contextlib import asynccontextmanager
-from typing import Optional
-from urllib.parse import urlparse, urlunparse
 import json
-import httpx
-from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.responses import JSONResponse, Response, StreamingResponse
-from starlette.middleware.cors import CORSMiddleware
+import logging
+import os
+import time
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from urllib.parse import urlparse, urlunparse
+from uuid import uuid4
 
-from mcp_router.core.config_loader import RouterConfig, ConfigWatcher, EndpointConfig, load_router_config
+import httpx
+import yaml
+from starlette.applications import Starlette
+from starlette.middleware.cors import CORSMiddleware
+from starlette.requests import ClientDisconnect, Request
+from starlette.responses import JSONResponse, Response, StreamingResponse
+
+from mcp_router.core.config_loader import (
+    ConfigWatcher,
+    Endpoint,
+    RouterConfig,
+    load_router_config,
+)
 from mcp_router.core.process_manager import ProcessManager
 
 # Configure logging to console safely
@@ -28,7 +34,7 @@ logger = logging.getLogger("mcp_router")
 class BridgeSession:
     path_prefix: str
     queue: asyncio.Queue
-    remote_session_id: Optional[str] = None
+    remote_session_id: str | None = None
 
 def get_target_url(config_url: str, request_path: str, path_prefix: str) -> str:
     parsed_cfg = urlparse(config_url)
@@ -53,7 +59,11 @@ def get_target_url(config_url: str, request_path: str, path_prefix: str) -> str:
     ))
     return target
 
-def filter_tools_response(line_or_body: str, allowed_tools: Optional[list[str]], denied_tools: Optional[list[str]]) -> str:
+def filter_tools_response(
+    line_or_body: str,
+    allowed_tools: list[str] | None,
+    denied_tools: list[str] | None,
+) -> str:
     """
     Parses a string (which may be a full JSON body or a single line of an SSE data payload),
     detects if it represents a JSON-RPC tools/list response, and filters the returned
@@ -90,8 +100,8 @@ def filter_tools_response(line_or_body: str, allowed_tools: Optional[list[str]],
                 result["tools"] = filtered_tools
                 data["result"] = result
                 return f"{prefix}{json.dumps(data)}"
-    except Exception:
-        pass
+    except (AttributeError, json.JSONDecodeError, TypeError):
+        return line_or_body
     return line_or_body
 
 def build_response_headers(headers, exclude_headers: set[str], body_was_decoded: bool = False) -> dict[str, str]:
@@ -103,7 +113,7 @@ def build_response_headers(headers, exclude_headers: set[str], body_was_decoded:
 def normalize_jsonrpc_request_body(body: bytes) -> bytes:
     try:
         payload = json.loads(body)
-    except Exception:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return body
 
     changed = False
@@ -130,7 +140,7 @@ class MCPRouter:
         self.app = app
         self.config_path = config_path
         self.process_manager = ProcessManager()
-        self._configs: dict[str, EndpointConfig] = {}
+        self._configs: dict[str, Endpoint] = {}
         self.last_activity: dict[str, float] = {}
         self.active_connections: dict[str, int] = {}
         self.locks: dict[str, asyncio.Lock] = {}
@@ -186,27 +196,25 @@ class MCPRouter:
                 await asyncio.sleep(10)  # check every 10 seconds
                 current_time = time.time()
                 for path, ep_cfg in list(self._configs.items()):
-                    if ep_cfg.mode == "managed_cli":
-                        # Check if process is running
-                        if self.process_manager.is_running(path):
-                            # If there are active connections, keep updating the last activity
-                            active_conns = self.active_connections.get(path, 0)
-                            if active_conns > 0:
-                                self.last_activity[path] = current_time
+                    if ep_cfg.mode == "managed_cli" and self.process_manager.is_running(path):
+                        # If there are active connections, keep updating the last activity
+                        active_conns = self.active_connections.get(path, 0)
+                        if active_conns > 0:
+                            self.last_activity[path] = current_time
 
-                            last_act = self.last_activity.get(path, 0)
-                            timeout = ep_cfg.timeout
-                            if current_time - last_act > timeout:
-                                logger.info(f"Inactivity timeout ({timeout}s) exceeded for {path}. Stopping process.")
-                                await self.process_manager.stop_managed_server(path)
+                        last_act = self.last_activity.get(path, 0)
+                        timeout = ep_cfg.timeout
+                        if current_time - last_act > timeout:
+                            logger.info(f"Inactivity timeout ({timeout}s) exceeded for {path}. Stopping process.")
+                            await self.process_manager.stop_managed_server(path)
             except asyncio.CancelledError:
                 break
-            except Exception as e:
-                logger.error(f"Error in idle timeout checker: {e}")
+            except (OSError, RuntimeError, ValueError) as exc:
+                logger.error(f"Error in idle timeout checker: {exc}")
 
     async def get_summary(self, request: Request):
         summary_list = []
-        for path, cfg in self._configs.items():
+        for cfg in self._configs.values():
             summary_list.append({
                 "path": cfg.path,
                 "mode": cfg.mode,
@@ -217,30 +225,32 @@ class MCPRouter:
     async def sse_proxy_generator(self, target_url, headers, params, path_prefix):
         self.active_connections[path_prefix] = self.active_connections.get(path_prefix, 0) + 1
         try:
-            async with httpx.AsyncClient() as client:
-                async with client.stream("GET", target_url, headers=headers, params=params, timeout=None) as response:
-                    buffer = ""
-                    async for chunk in response.aiter_text():
-                        self.last_activity[path_prefix] = time.time()
-                        buffer += chunk
-                        while "\n" in buffer:
-                            line, buffer = buffer.split("\n", 1)
-                            if line.startswith("data: "):
-                                data_content = line[6:].strip()
-                                if data_content.startswith("/") or data_content.startswith("http"):
-                                    parsed = urlparse(data_content)
-                                    if parsed.netloc:
-                                        new_path = f"/{path_prefix}{parsed.path}"
-                                        if parsed.query:
-                                            new_path += f"?{parsed.query}"
-                                        line = f"data: {new_path}"
-                                    else:
-                                        line = f"data: /{path_prefix}{data_content}"
-                            # Filter tools list response if configured
-                            ep_cfg = self._configs.get(path_prefix)
-                            if ep_cfg:
-                                line = filter_tools_response(line, ep_cfg.allowed_tools, ep_cfg.denied_tools)
-                            yield (line + "\n").encode("utf-8")
+            async with (
+                httpx.AsyncClient() as client,
+                client.stream("GET", target_url, headers=headers, params=params, timeout=None) as response,
+            ):
+                buffer = ""
+                async for chunk in response.aiter_text():
+                    self.last_activity[path_prefix] = time.time()
+                    buffer += chunk
+                    while "\n" in buffer:
+                        line, buffer = buffer.split("\n", 1)
+                        if line.startswith("data: "):
+                            data_content = line[6:].strip()
+                            if data_content.startswith(("/", "http")):
+                                parsed = urlparse(data_content)
+                                if parsed.netloc:
+                                    new_path = f"/{path_prefix}{parsed.path}"
+                                    if parsed.query:
+                                        new_path += f"?{parsed.query}"
+                                    line = f"data: {new_path}"
+                                else:
+                                    line = f"data: /{path_prefix}{data_content}"
+                        # Filter tools list response if configured
+                        ep_cfg = self._configs.get(path_prefix)
+                        if ep_cfg:
+                            line = filter_tools_response(line, ep_cfg.allowed_tools, ep_cfg.denied_tools)
+                        yield (line + "\n").encode("utf-8")
         finally:
             self.active_connections[path_prefix] = max(0, self.active_connections.get(path_prefix, 0) - 1)
             self.last_activity[path_prefix] = time.time()
@@ -248,7 +258,7 @@ class MCPRouter:
     async def local_sse_generator(self, session_id, queue, path_prefix):
         self.active_connections[path_prefix] = self.active_connections.get(path_prefix, 0) + 1
         client_post_uri = f"/{path_prefix}?session_id={session_id}"
-        yield f"event: endpoint\ndata: {client_post_uri}\n\n".encode("utf-8")
+        yield f"event: endpoint\ndata: {client_post_uri}\n\n".encode()
         try:
             while True:
                 line = await queue.get()
@@ -277,9 +287,9 @@ class MCPRouter:
                     logger.info(f"On-demand activation triggered for: {path_prefix}")
                     try:
                         await self.process_manager.start_managed_server(ep_cfg)
-                    except Exception as e:
-                        logger.error(f"Failed to start managed server {path_prefix}: {e}")
-                        return JSONResponse({"error": f"Failed to start managed server: {e}"}, status_code=500)
+                    except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
+                        logger.error(f"Failed to start managed server {path_prefix}: {exc}")
+                        return JSONResponse({"error": f"Failed to start managed server: {exc}"}, status_code=500)
 
         # 3. Construct target URL
         request_path = request.url.path
@@ -403,16 +413,16 @@ class MCPRouter:
                                 async for line in response.aiter_lines():
                                     filtered_line = filter_tools_response(line, ep_cfg.allowed_tools, ep_cfg.denied_tools)
                                     await queue.put(filtered_line)
-                        except Exception as e:
-                            logger.error(f"Error reading response from streamable-http backend: {e}")
+                        except (httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
+                            logger.error(f"Error reading response from streamable-http backend: {exc}")
                         finally:
                             await response_stream.__aexit__(None, None, None)
                             await client.aclose()
                     asyncio.create_task(process_response())
                     return Response("Accepted", status_code=202)
-                except Exception as e:
-                    logger.error(f"Failed to proxy POST request to streamable-http backend: {e}")
-                    return JSONResponse({"error": f"Failed to proxy request: {e}"}, status_code=502)
+                except (ClientDisconnect, httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
+                    logger.error(f"Failed to proxy POST request to streamable-http backend: {exc}")
+                    return JSONResponse({"error": f"Failed to proxy request: {exc}"}, status_code=502)
             else:
                 try:
                     client = httpx.AsyncClient()
@@ -480,9 +490,9 @@ class MCPRouter:
                             headers=resp_headers,
                             media_type=content_type
                         )
-                except Exception as e:
-                    logger.error(f"Proxy error for {path_prefix}: {e}")
-                    return JSONResponse({"error": f"Proxy error: {e}"}, status_code=502)
+                except (ClientDisconnect, httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
+                    logger.error(f"Proxy error for {path_prefix}: {exc}")
+                    return JSONResponse({"error": f"Proxy error: {exc}"}, status_code=502)
 
 # Determine config file path relative to server.py
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -501,8 +511,8 @@ async def lifespan(app: Starlette):
         try:
             initial_config = load_router_config(CONFIG_PATH)
             router.apply_configuration(initial_config)
-        except Exception as e:
-            logger.error(f"Failed to apply initial configuration: {e}")
+        except (OSError, RuntimeError, ValueError, yaml.YAMLError) as exc:
+            logger.error(f"Failed to apply initial configuration: {exc}")
             
     # Start idle timeout checker
     router._running = True
