@@ -68,7 +68,7 @@ def _load_runner_module() -> ModuleType:
 
 def test_runner_version_check_requires_exact_match(tmp_path: Path):
     module = _load_runner_module()
-    check_version = cast(Callable[..., str], getattr(module, "check_version"))
+    check_version = cast(Callable[..., str], module.check_version)
     executable = tmp_path / "ruff"
     executable.write_text("#!/usr/bin/env python3\nprint('ruff 0.16.50')\n", encoding="utf-8")
     executable.chmod(0o755)
