@@ -421,7 +421,7 @@ class EventStreamResponse:
 
 
 @pytest.mark.asyncio
-async def test_downstream_stream_close_closes_upstream_response_context():
+async def test_downstream_cancellation_closes_upstream_response_context():
     isolated = MCPRouter(Starlette(), "/tmp/not-used.yaml")
     isolated._configs = {
         "example": EndpointConfig(
@@ -454,5 +454,11 @@ async def test_downstream_stream_close_closes_upstream_response_context():
     first_event = await anext(body_iterator)
     assert b": keepalive" in first_event
     assert b"id: 1" in first_event
-    await body_iterator.aclose()
+
+    blocked_read = asyncio.create_task(anext(body_iterator))
+    await asyncio.sleep(0)
+    blocked_read.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await blocked_read
+
     stream_context.__aexit__.assert_awaited_once()
