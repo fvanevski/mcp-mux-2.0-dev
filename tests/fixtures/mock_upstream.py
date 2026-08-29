@@ -106,9 +106,11 @@ class MockMCPUpstream:
 
         method = json_body.get("method")
         params = json_body.get("params") if isinstance(json_body.get("params"), dict) else {}
-        if method in {"tools/call", "resources/read", "prompts/get"}:
-            if headers.get("mcp-name") != params.get("name"):
-                return self._json_response({"error": "name header mismatch"}, status_code=400)
+        if (
+            method in {"tools/call", "resources/read", "prompts/get"}
+            and headers.get("mcp-name") != params.get("name")
+        ):
+            return self._json_response({"error": "name header mismatch"}, status_code=400)
 
         if method == "server/discover":
             result = {"protocolVersion": "2026-07-28", "capabilities": {"tools": {}}}
@@ -168,7 +170,7 @@ class MockMCPUpstream:
                 content=(
                     "event: endpoint\n"
                     "data: /mcp/messages/?session_id=legacy-upstream-001\n\n"
-                ).encode("utf-8"),
+                ),
             )
 
         if request.method == "POST" and request.url.path == "/mcp/messages/":
