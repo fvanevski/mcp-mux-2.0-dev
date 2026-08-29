@@ -155,18 +155,18 @@ class MockMCPUpstream:
                 code=-32602,
                 message=f"missing required {CLIENT_CAPABILITIES_META}",
             )
+        if headers.get("mcp-protocol-version") != body_version:
+            return self._jsonrpc_error(
+                request_id,
+                code=-32020,
+                message="MCP-Protocol-Version header mismatch",
+            )
         if body_version != MODERN_PROTOCOL_VERSION:
             return self._jsonrpc_error(
                 request_id,
                 code=-32022,
                 message="unsupported protocol version",
                 data={"supportedVersions": [MODERN_PROTOCOL_VERSION]},
-            )
-        if headers.get("mcp-protocol-version") != body_version:
-            return self._jsonrpc_error(
-                request_id,
-                code=-32020,
-                message="MCP-Protocol-Version header mismatch",
             )
         if headers.get("mcp-method") != method:
             return self._jsonrpc_error(request_id, code=-32020, message="Mcp-Method header mismatch")

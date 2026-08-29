@@ -99,7 +99,8 @@ Primary protocol references:
 | `M-ST-04` | Frozen branch upstream identity/mode/transport remains explicit. | Current architecture | `test_configured_upstreams_are_frozen_as_streamable_http[...]` |
 | `M-ST-05` | Current router normalizes POST `Accept` upstream to `application/json, text/event-stream`. | Current behavior | operator scenario test + existing router regression |
 | `M-ST-06` | The deterministic oracle rejects missing required per-request metadata. | Fixture authority | `test_modern_fixture_rejects_missing_required_per_request_metadata[...]` |
-| `M-ST-07` | Protocol-version header/body mismatch is a `400` `HeaderMismatch`. | Fixture authority / target | `test_modern_fixture_rejects_protocol_header_body_mismatch` |
+| `M-ST-07` | Protocol-version header/body mismatch takes precedence and is a `400` `HeaderMismatch` (`-32020`). | Fixture authority / target | `test_modern_fixture_rejects_protocol_header_body_mismatch` |
+| `M-ST-07A` | A matching header/body version that the fixture does not support is `UnsupportedProtocolVersion` (`-32022`) with supported-version data. | Fixture authority / target | `test_modern_fixture_rejects_matching_unsupported_protocol_version` |
 | `M-ST-08` | `resources/read` derives `Mcp-Name` from `params.uri`. | Fixture authority / target | `test_modern_fixture_uses_resource_uri_for_mcp_name` |
 | `M-ST-09` | A legacy session header is not used as modern protocol state. | Fixture authority / target | `test_modern_fixture_does_not_use_legacy_session_header_for_protocol_state` |
 | `M-ST-10` | Successful fixture responses include `resultType`; listed tools include `inputSchema`. | Fixture authority | operator scenario assertions |

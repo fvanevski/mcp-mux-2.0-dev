@@ -208,19 +208,51 @@ async def test_modern_fixture_rejects_missing_required_per_request_metadata(miss
 @pytest.mark.asyncio
 async def test_modern_fixture_rejects_protocol_header_body_mismatch():
     upstream = MockMCPUpstream("modern-stateless")
+    request = _modern_request(1, "tools/list")
+    params = request["params"]
+    assert isinstance(params, dict)
+    meta = params["_meta"]
+    assert isinstance(meta, dict)
+    meta[PROTOCOL_VERSION_META] = "2099-01-01"
 
     async with httpx.AsyncClient(transport=upstream.transport, base_url="http://mock-upstream.local") as client:
         response = await client.post(
             "/mcp",
-            json=_modern_request(1, "tools/list"),
+            json=request,
             headers={
-                "MCP-Protocol-Version": "2099-01-01",
+                "MCP-Protocol-Version": MODERN_PROTOCOL_VERSION,
                 "Mcp-Method": "tools/list",
             },
         )
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == -32020
+
+
+@pytest.mark.asyncio
+async def test_modern_fixture_rejects_matching_unsupported_protocol_version():
+    upstream = MockMCPUpstream("modern-stateless")
+    unsupported_version = "2099-01-01"
+    request = _modern_request(1, "tools/list")
+    params = request["params"]
+    assert isinstance(params, dict)
+    meta = params["_meta"]
+    assert isinstance(meta, dict)
+    meta[PROTOCOL_VERSION_META] = unsupported_version
+
+    async with httpx.AsyncClient(transport=upstream.transport, base_url="http://mock-upstream.local") as client:
+        response = await client.post(
+            "/mcp",
+            json=request,
+            headers={
+                "MCP-Protocol-Version": unsupported_version,
+                "Mcp-Method": "tools/list",
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == -32022
+    assert response.json()["error"]["data"] == {"supportedVersions": [MODERN_PROTOCOL_VERSION]}
 
 
 @pytest.mark.asyncio
