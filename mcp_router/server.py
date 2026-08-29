@@ -14,7 +14,13 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 
-from mcp_router.core.config_loader import RouterConfig, ConfigWatcher, EndpointConfig, load_router_config
+from mcp_router.core.config_loader import (
+    ConfigWatcher,
+    Endpoint,
+    ManagedEndpointConfig,
+    RouterConfig,
+    load_router_config,
+)
 from mcp_router.core.process_manager import ProcessManager
 
 # Configure logging to console safely
@@ -130,7 +136,7 @@ class MCPRouter:
         self.app = app
         self.config_path = config_path
         self.process_manager = ProcessManager()
-        self._configs: dict[str, EndpointConfig] = {}
+        self._configs: dict[str, Endpoint] = {}
         self.last_activity: dict[str, float] = {}
         self.active_connections: dict[str, int] = {}
         self.locks: dict[str, asyncio.Lock] = {}
@@ -186,7 +192,7 @@ class MCPRouter:
                 await asyncio.sleep(10)  # check every 10 seconds
                 current_time = time.time()
                 for path, ep_cfg in list(self._configs.items()):
-                    if ep_cfg.mode == "managed_cli":
+                    if isinstance(ep_cfg, ManagedEndpointConfig):
                         # Check if process is running
                         if self.process_manager.is_running(path):
                             # If there are active connections, keep updating the last activity
@@ -271,7 +277,7 @@ class MCPRouter:
         self.last_activity[path_prefix] = time.time()
 
         # 2. Check if we need to start the process
-        if ep_cfg.mode == "managed_cli":
+        if isinstance(ep_cfg, ManagedEndpointConfig):
             async with self.locks[path_prefix]:
                 if not self.process_manager.is_running(path_prefix):
                     logger.info(f"On-demand activation triggered for: {path_prefix}")
@@ -491,23 +497,17 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config.yaml")
 @asynccontextmanager
 async def lifespan(app: Starlette):
     logger.info("Initializing MCP Router Lifespan...")
-    
-    # Start dynamic configuration file watcher
+
+    # Validate and apply the initial configuration before activating runtime tasks.
+    initial_config = load_router_config(CONFIG_PATH)
+    router.apply_configuration(initial_config)
+
     watcher = ConfigWatcher(CONFIG_PATH, router.apply_configuration)
     await watcher.start()
-    
-    # Perform initial configuration load
-    if os.path.exists(CONFIG_PATH):
-        try:
-            initial_config = load_router_config(CONFIG_PATH)
-            router.apply_configuration(initial_config)
-        except Exception as e:
-            logger.error(f"Failed to apply initial configuration: {e}")
-            
-    # Start idle timeout checker
+
     router._running = True
     router._checker_task = asyncio.create_task(router.idle_timeout_checker())
-    
+
     try:
         yield
     finally:
