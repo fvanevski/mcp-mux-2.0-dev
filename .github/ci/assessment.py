@@ -346,7 +346,7 @@ def main() -> int:
     except Stop as exc:
         result = exc.result
         warnings.append(str(exc))
-    except Exception as exc:
+    except (OSError, UnicodeError, ValueError, RuntimeError) as exc:
         result = "INFRA_ERROR"
         warnings.append(f"unexpected runner error: {type(exc).__name__}: {exc}")
 
@@ -387,7 +387,7 @@ def main() -> int:
             output.write_text(payload, encoding="utf-8")
             print(f"evidence_path={output}", file=sys.stderr)
             print(f"evidence_sha256={hashlib.sha256(payload.encode()).hexdigest()}", file=sys.stderr)
-        except Exception as exc:
+        except (OSError, UnicodeError) as exc:
             result = "INFRA_ERROR"
             warnings.append(f"failed to write evidence output: {type(exc).__name__}: {exc}")
             evidence["host_evidence_result"] = result
