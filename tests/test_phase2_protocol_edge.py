@@ -450,7 +450,7 @@ async def test_downstream_stream_close_closes_upstream_response_context():
 
     response = await isolated.catch_all_proxy(request)
     assert isinstance(response, StreamingResponse)
-    body_iterator = cast(AsyncGenerator[bytes, None], response.body_iterator)
+    body_iterator = cast(AsyncGenerator[bytes], response.body_iterator)
     first_event = await anext(body_iterator)
     assert b": keepalive" in first_event
     assert b"id: 1" in first_event

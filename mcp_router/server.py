@@ -433,7 +433,7 @@ class MCPRouter:
         session_id: str,
         queue: asyncio.Queue[str],
         path_prefix: str,
-    ) -> AsyncGenerator[bytes, None]:
+    ) -> AsyncGenerator[bytes]:
         self.active_connections[path_prefix] = self.active_connections.get(path_prefix, 0) + 1
         client_post_uri = f"/{path_prefix}?session_id={session_id}"
         yield f"event: endpoint\ndata: {client_post_uri}\n\n".encode()
