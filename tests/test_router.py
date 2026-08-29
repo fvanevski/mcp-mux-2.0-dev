@@ -2,15 +2,21 @@ import asyncio
 import json
 import os
 import sys
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from mcp_router.core.config_loader import EndpointConfig, RouterConfig, expand_env_vars
+from mcp_router.core.config_loader import (
+    EndpointConfig,
+    ManagedEndpointConfig,
+    RouterConfig,
+    expand_env_vars,
+)
 from mcp_router.core.process_manager import ProcessManager
-from mcp_router.server import app, router, BridgeSession
+from mcp_router.server import BridgeSession, app, filter_tools_response, router
 
 # --- Config Loader Tests ---
 
@@ -187,7 +193,7 @@ async def test_process_manager_lifecycle():
     pm._processes.clear()
     pm._log_tasks.clear()
 
-    cfg = EndpointConfig(
+    cfg = ManagedEndpointConfig(
         path="mock-mcp",
         mode="managed_cli",
         argv=["python", "-m", "http.server", "8099"],
@@ -395,8 +401,6 @@ async def test_streamable_http_bridge():
 
 
 # --- Tool Filtering Tests ---
-
-from mcp_router.server import filter_tools_response
 
 def test_endpoint_config_allowed_denied_validation():
     # Both provided -> denied_tools is cleared to None (precedence to allowed)

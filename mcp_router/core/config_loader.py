@@ -10,7 +10,14 @@ from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 
 logger = logging.getLogger(__name__)
 ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -38,7 +45,7 @@ def expand_env_vars(value: Any) -> Any:
     return value
 
 
-def load_router_config(config_path: str) -> "RouterConfig":
+def load_router_config(config_path: str) -> RouterConfig:
     with open(config_path, encoding="utf-8") as config_file:
         data = yaml.safe_load(config_file) or {}
     return RouterConfig.model_validate(expand_env_vars(data))
@@ -158,7 +165,7 @@ class EndpointBase(BaseModel):
         return cleaned_headers or None
 
     @model_validator(mode="after")
-    def finalize_common_fields(self) -> "EndpointBase":
+    def finalize_common_fields(self) -> EndpointBase:
         if self.allowed_tools is not None and self.denied_tools is not None:
             self.denied_tools = None
 
@@ -238,7 +245,7 @@ class ManagedEndpointConfig(EndpointBase):
         return _validate_optional_text(value, "unsafe_shell_command")
 
     @model_validator(mode="after")
-    def finalize_managed_fields(self) -> "ManagedEndpointConfig":
+    def finalize_managed_fields(self) -> ManagedEndpointConfig:
         execution_sources = int(self.argv is not None) + int(self.unsafe_shell_command is not None)
         if execution_sources != 1:
             raise ValueError("managed_cli requires exactly one of argv or unsafe_shell_command")
@@ -269,7 +276,7 @@ class RouterConfig(BaseModel):
     endpoints: list[Endpoint]
 
     @model_validator(mode="after")
-    def validate_ports_and_paths(self) -> "RouterConfig":
+    def validate_ports_and_paths(self) -> RouterConfig:
         ports: set[int] = set()
         paths: set[str] = set()
         for endpoint in self.endpoints:
@@ -304,6 +311,13 @@ class ConfigWatcher:
         self._running = False
 
     async def start(self) -> None:
+        if os.path.exists(self.config_path):
+            initial_config = load_router_config(self.config_path)
+            result = self.callback(initial_config)
+            if inspect.isawaitable(result):
+                await result
+            self._last_mtime = os.path.getmtime(self.config_path)
+
         self._running = True
         self._task = asyncio.create_task(self._poll_loop())
         logger.info("Started config polling for: %s", self.config_path)
@@ -328,7 +342,7 @@ class ConfigWatcher:
         logger.info("Detected change in configuration: %s", self.config_path)
         try:
             new_config = load_router_config(self.config_path)
-        except Exception as exc:
+        except (OSError, ValueError, yaml.YAMLError) as exc:
             logger.error("Failed to load or validate new config: %s", exc)
             return False
 
@@ -341,6 +355,6 @@ class ConfigWatcher:
         while self._running:
             try:
                 await self._reload_if_changed()
-            except Exception as exc:
+            except (OSError, RuntimeError, ValueError) as exc:
                 logger.error("Error in config watcher poll loop: %s", exc)
             await asyncio.sleep(self.poll_interval)

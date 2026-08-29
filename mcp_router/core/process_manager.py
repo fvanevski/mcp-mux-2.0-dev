@@ -4,7 +4,6 @@ import asyncio
 import logging
 import os
 import signal
-from typing import Optional
 
 from .config_loader import ManagedEndpointConfig
 
@@ -14,7 +13,9 @@ logger = logging.getLogger(__name__)
 class ProcessManager:
     """Registry for managed local subprocess lifecycles."""
 
-    _instance: Optional["ProcessManager"] = None
+    _instance: ProcessManager | None = None
+    _processes: dict[str, asyncio.subprocess.Process]
+    _log_tasks: list[asyncio.Task[None]]
 
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
@@ -85,6 +86,8 @@ class ProcessManager:
                 )
 
             self._processes[path] = proc
+            if proc.stdout is None or proc.stderr is None:
+                raise RuntimeError(f"Managed endpoint '{path}' did not expose piped output streams")
             task_stdout = asyncio.create_task(self._stream_logs(proc.stdout, f"{path}:stdout"))
             task_stderr = asyncio.create_task(self._stream_logs(proc.stderr, f"{path}:stderr"))
             self._log_tasks.extend([task_stdout, task_stderr])
@@ -104,7 +107,7 @@ class ProcessManager:
 
             logger.info("Subserver for path '%s' is ready at %s", path, endpoint_cfg.url)
             return endpoint_cfg.url
-        except Exception as exc:
+        except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
             logger.error("Failed to launch subserver for path '%s': %s", path, exc)
             await self.stop_managed_server(path)
             raise
@@ -124,7 +127,7 @@ class ProcessManager:
 
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=3.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     logger.warning("Process for '%s' (PID %s) did not exit. Forcing SIGKILL.", path, proc.pid)
                     if hasattr(os, "killpg") and hasattr(os, "getpgid"):
                         try:
@@ -134,7 +137,7 @@ class ProcessManager:
                     else:
                         proc.kill()
                     await proc.wait()
-            except Exception as exc:
+            except (OSError, RuntimeError) as exc:
                 logger.error("Error terminating process group for '%s': %s", path, exc)
 
     async def _stream_logs(self, stream: asyncio.StreamReader, prefix: str):
@@ -147,7 +150,7 @@ class ProcessManager:
                 logger.info("[%s] %s", prefix, decoded)
         except asyncio.CancelledError:
             pass
-        except Exception as exc:
+        except (OSError, RuntimeError) as exc:
             logger.error("Error streaming logs for %s: %s", prefix, exc)
 
     async def _wait_for_port(

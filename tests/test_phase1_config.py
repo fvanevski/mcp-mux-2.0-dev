@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
 
 import pytest
 from pydantic import ValidationError
@@ -180,10 +179,10 @@ async def test_invalid_initial_config_prevents_runtime_startup(tmp_path: Path, m
         encoding="utf-8",
     )
     monkeypatch.setattr(server_module, "CONFIG_PATH", str(config_path))
+    server_module.router._running = False
 
-    with patch.object(server_module.ConfigWatcher, "start", new=AsyncMock()) as watcher_start:
-        with pytest.raises(ValidationError):
-            async with server_module.lifespan(server_module.app):
-                pass
+    with pytest.raises(ValidationError):
+        async with server_module.lifespan(server_module.app):
+            pass
 
-    watcher_start.assert_not_awaited()
+    assert server_module.router._running is False
