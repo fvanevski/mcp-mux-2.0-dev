@@ -229,28 +229,28 @@ class MCPRouter:
                 httpx.AsyncClient() as client,
                 client.stream("GET", target_url, headers=headers, params=params, timeout=None) as response,
             ):
-                    buffer = ""
-                    async for chunk in response.aiter_text():
-                        self.last_activity[path_prefix] = time.time()
-                        buffer += chunk
-                        while "\n" in buffer:
-                            line, buffer = buffer.split("\n", 1)
-                            if line.startswith("data: "):
-                                data_content = line[6:].strip()
-                                if data_content.startswith(("/", "http")):
-                                    parsed = urlparse(data_content)
-                                    if parsed.netloc:
-                                        new_path = f"/{path_prefix}{parsed.path}"
-                                        if parsed.query:
-                                            new_path += f"?{parsed.query}"
-                                        line = f"data: {new_path}"
-                                    else:
-                                        line = f"data: /{path_prefix}{data_content}"
-                            # Filter tools list response if configured
-                            ep_cfg = self._configs.get(path_prefix)
-                            if ep_cfg:
-                                line = filter_tools_response(line, ep_cfg.allowed_tools, ep_cfg.denied_tools)
-                            yield (line + "\n").encode("utf-8")
+                buffer = ""
+                async for chunk in response.aiter_text():
+                    self.last_activity[path_prefix] = time.time()
+                    buffer += chunk
+                    while "\n" in buffer:
+                        line, buffer = buffer.split("\n", 1)
+                        if line.startswith("data: "):
+                            data_content = line[6:].strip()
+                            if data_content.startswith(("/", "http")):
+                                parsed = urlparse(data_content)
+                                if parsed.netloc:
+                                    new_path = f"/{path_prefix}{parsed.path}"
+                                    if parsed.query:
+                                        new_path += f"?{parsed.query}"
+                                    line = f"data: {new_path}"
+                                else:
+                                    line = f"data: /{path_prefix}{data_content}"
+                        # Filter tools list response if configured
+                        ep_cfg = self._configs.get(path_prefix)
+                        if ep_cfg:
+                            line = filter_tools_response(line, ep_cfg.allowed_tools, ep_cfg.denied_tools)
+                        yield (line + "\n").encode("utf-8")
         finally:
             self.active_connections[path_prefix] = max(0, self.active_connections.get(path_prefix, 0) - 1)
             self.last_activity[path_prefix] = time.time()
