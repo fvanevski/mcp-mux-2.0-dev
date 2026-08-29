@@ -71,6 +71,10 @@ def build_jsonrpc_error(
     return {"jsonrpc": "2.0", "id": request_id, "error": error}
 
 
+def _reject_json_constant(value: str) -> Any:
+    raise ValueError(f"Invalid JSON numeric constant: {value}")
+
+
 def parse_jsonrpc_request(body: bytes) -> ParsedJSONRPCRequest:
     try:
         text = body.decode("utf-8")
@@ -78,8 +82,8 @@ def parse_jsonrpc_request(body: bytes) -> ParsedJSONRPCRequest:
         raise ProtocolRequestError(PARSE_ERROR, "Request body is not valid UTF-8 JSON") from exc
 
     try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
+        payload = json.loads(text, parse_constant=_reject_json_constant)
+    except (json.JSONDecodeError, ValueError) as exc:
         raise ProtocolRequestError(PARSE_ERROR, "Parse error") from exc
 
     if isinstance(payload, list):

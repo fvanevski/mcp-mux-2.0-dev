@@ -58,6 +58,11 @@ _HTTP_LIMITS = httpx.Limits(
 )
 
 
+def _upstream_stream_timeout(timeout: float) -> httpx.Timeout:
+    """Bound request setup/write/pool operations without imposing an SSE read-idle timeout."""
+    return httpx.Timeout(timeout, read=None)
+
+
 @dataclass
 class BridgeSession:
     path_prefix: str
@@ -392,11 +397,11 @@ class MCPRouter:
             target_url,
             headers=headers,
             params=params,
-            timeout=timeout,
+            timeout=_upstream_stream_timeout(timeout),
         )
         response: httpx.Response | None = None
         try:
-            response = await stream_context.__aenter__()
+            response = await asyncio.wait_for(stream_context.__aenter__(), timeout=timeout)
             async for event in iter_sse_events(response.aiter_lines()):
                 self.last_activity[path_prefix] = time.time()
 
@@ -479,9 +484,12 @@ class MCPRouter:
                 headers=forward_headers,
                 params=params,
                 content=request_body,
+                timeout=_upstream_stream_timeout(endpoint.upstream_timeout),
+            )
+            response = await asyncio.wait_for(
+                stream_context.__aenter__(),
                 timeout=endpoint.upstream_timeout,
             )
-            response = await stream_context.__aenter__()
         except (httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
             logger.error("Failed to proxy bridge POST to streamable-http backend: %s", exc)
             return JSONResponse({"error": f"Failed to proxy request: {exc}"}, status_code=502)
@@ -494,7 +502,10 @@ class MCPRouter:
             try:
                 content_type = response.headers.get("content-type", "").casefold()
                 if "application/json" in content_type:
-                    body_bytes = await response.aread()
+                    body_bytes = await asyncio.wait_for(
+                        response.aread(),
+                        timeout=endpoint.upstream_timeout,
+                    )
                     body_str = body_bytes.decode("utf-8", errors="replace")
                     filtered_body = filter_tools_response(
                         body_str,
@@ -518,7 +529,15 @@ class MCPRouter:
                             await session.queue.put(line)
                         await session.queue.put("")
                 else:
-                    async for line in response.aiter_lines():
+                    line_iterator = response.aiter_lines().__aiter__()
+                    while True:
+                        try:
+                            line = await asyncio.wait_for(
+                                anext(line_iterator),
+                                timeout=endpoint.upstream_timeout,
+                            )
+                        except StopAsyncIteration:
+                            break
                         await session.queue.put(line)
             except asyncio.CancelledError:
                 raise
@@ -548,9 +567,12 @@ class MCPRouter:
                 headers=forward_headers,
                 params=dict(request.query_params),
                 content=request_body,
+                timeout=_upstream_stream_timeout(endpoint.upstream_timeout),
+            )
+            response = await asyncio.wait_for(
+                stream_context.__aenter__(),
                 timeout=endpoint.upstream_timeout,
             )
-            response = await stream_context.__aenter__()
         except (ClientDisconnect, httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
             logger.error("Proxy error for %s: %s", path_prefix, exc)
             return JSONResponse({"error": f"Proxy error: {exc}"}, status_code=502)
@@ -558,7 +580,12 @@ class MCPRouter:
         content_type = response.headers.get("content-type", "")
         if "application/json" in content_type.casefold():
             try:
-                body_bytes = await response.aread()
+                body_bytes = await asyncio.wait_for(
+                    response.aread(),
+                    timeout=endpoint.upstream_timeout,
+                )
+            except TimeoutError:
+                return JSONResponse({"error": "Upstream response timed out"}, status_code=504)
             finally:
                 await stream_context.__aexit__(None, None, None)
             body_str = body_bytes.decode("utf-8", errors="replace")
@@ -620,8 +647,16 @@ class MCPRouter:
         )
 
         async def content_generator() -> AsyncIterator[bytes]:
+            iterator = response.aiter_bytes().__aiter__()
             try:
-                async for chunk in response.aiter_bytes():
+                while True:
+                    try:
+                        chunk = await asyncio.wait_for(
+                            anext(iterator),
+                            timeout=endpoint.upstream_timeout,
+                        )
+                    except StopAsyncIteration:
+                        break
                     yield chunk
             finally:
                 await stream_context.__aexit__(None, None, None)
@@ -643,7 +678,7 @@ class MCPRouter:
 
         endpoint = self._configs[path_prefix]
         subpath = request.path_params.get("subpath")
-        if subpath and endpoint.transport != "sse":
+        if subpath is not None and endpoint.transport != "sse":
             return _transport_error_response(
                 404,
                 f"Streamable HTTP endpoint '/{path_prefix}' does not expose subpaths",
