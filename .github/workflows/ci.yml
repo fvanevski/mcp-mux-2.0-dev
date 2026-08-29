@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI_TOOLCHAIN: .github/ci/toolchain.txt
+  BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+  TARGET_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  ruff:
+    name: Ruff
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version-file: .python-version
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+        with:
+          version: "0.12.7"
+          enable-cache: true
+      - name: Sync locked project environment
+        run: uv sync --frozen
+      - name: Select changed Python files
+        run: |
+          .github/ci/changed-python.sh "$BASE_SHA" "$TARGET_SHA" > "$RUNNER_TEMP/changed-python.txt"
+          cat "$RUNNER_TEMP/changed-python.txt"
+      - name: Ruff lint changed Python
+        run: |
+          mapfile -t files < "$RUNNER_TEMP/changed-python.txt"
+          if ((${#files[@]} == 0)); then
+            echo "No changed Python files."
+            exit 0
+          fi
+          uv run --frozen --with-requirements "$CI_TOOLCHAIN" ruff --version
+          uv run --frozen --with-requirements "$CI_TOOLCHAIN" ruff check "${files[@]}"
+
+  pyrefly:
+    name: Pyrefly
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version-file: .python-version
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+        with:
+          version: "0.12.7"
+          enable-cache: true
+      - name: Sync locked project environment
+        run: uv sync --frozen
+      - name: Select changed Python files
+        run: |
+          .github/ci/changed-python.sh "$BASE_SHA" "$TARGET_SHA" > "$RUNNER_TEMP/changed-python.txt"
+          cat "$RUNNER_TEMP/changed-python.txt"
+      - name: Pyrefly type check changed Python
+        run: |
+          mapfile -t files < "$RUNNER_TEMP/changed-python.txt"
+          if ((${#files[@]} == 0)); then
+            echo "No changed Python files."
+            exit 0
+          fi
+          uv run --frozen --with-requirements "$CI_TOOLCHAIN" pyrefly --version
+          uv run --frozen --with-requirements "$CI_TOOLCHAIN" pyrefly check "${files[@]}"
+
+  pytest:
+    name: Pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version-file: .python-version
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+        with:
+          version: "0.12.7"
+          enable-cache: true
+      - name: Sync locked project environment
+        run: uv sync --frozen
+      - name: Pytest suite
+        run: |
+          uv run --frozen --with-requirements "$CI_TOOLCHAIN" pytest --version
+          uv run --frozen --with-requirements "$CI_TOOLCHAIN" pytest -q
