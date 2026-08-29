@@ -37,6 +37,14 @@ graph TD
     A --> I[summary route]
 ```
 
+Normative refactor contracts are maintained in:
+
+- `docs/architecture/ADR-001-endpoint-gateway.md` — source-derived architecture and target endpoint boundary;
+- `docs/compatibility-matrix.md` — current/target/legacy claims and named compatibility scenarios;
+- `docs/validation.md` — deterministic CI/local-assessment authority and evidence contract.
+
+These files, together with the governing GitHub issues, supersede historical README prose when a refactor contract is more specific.
+
 ---
 
 ## ⚙️ Configuration (`config.yaml`)
@@ -161,4 +169,4 @@ The project is fully tested using `pytest` and `pytest-asyncio`. To execute unit
 uv run pytest
 ```
 
-Current verification state: `27 passed`.
+Validation authority and exact commands are documented in `docs/validation.md`. Use current exact-head CI/runner evidence rather than a hard-coded historical pass count.

@@ -11,7 +11,7 @@
 
 This decision records that architecture from current source before later phases change protocol handling. It also fixes the target public contract for MCP `2026-07-28` traffic so later protocol work does not accidentally turn the mux into a monolithic MCP server.
 
-The target protocol revision is intentionally different from the current implementation in several places. MCP `2026-07-28` is stateless at the protocol layer: modern requests do not use the legacy `initialize` handshake or `Mcp-Session-Id`, and gateway-relevant method/name routing information is carried in MCP HTTP headers. Later phases are responsible for enforcing those rules; Phase 0 only freezes the boundary and the compatibility evidence.
+The target protocol revision is intentionally different from the current implementation in several places. MCP `2026-07-28` is stateless at the protocol layer: every modern request carries its protocol version and client capabilities in `params._meta`, and Streamable HTTP mirrors protocol/method/name routing information into required HTTP headers. Modern processing must not depend on the legacy `initialize` handshake, connection history, or `Mcp-Session-Id` as protocol state. Later phases are responsible for enforcing those rules at the gateway edge; Phase 0 freezes the boundary and supplies a protocol-valid deterministic compatibility oracle.
 
 ## Current architecture from source
 
@@ -66,7 +66,7 @@ There are two distinct legacy paths.
 
 Bridge sessions are keyed globally but carry `path_prefix`. Cross-endpoint reuse is rejected with `409`, and `apply_configuration()` drops sessions when an endpoint is removed or its configuration changes.
 
-No active endpoint in `mcp_router/config.yaml` sets `legacy_sse_bridge: true`. Phase 0 therefore records the bridge as **provisionally unused by real clients**, pending deployment telemetry or an explicit downstream-client inventory.
+No active endpoint in `mcp_router/config.yaml` sets `legacy_sse_bridge: true`. The operator-verified concrete-client inventory recorded on Issue #3 also identifies no client that requires the bridge. Phase 0 therefore records it as **provisionally unused by real clients**, pending deployment telemetry or new authoritative client evidence.
 
 ### Current legacy HTTP+SSE path
 
@@ -115,15 +115,21 @@ For MCP `2026-07-28`, the canonical public route is:
 POST /<namespace>
 ```
 
-Modern requests are stateless and self-contained. They must not depend on a local mux protocol session. Later protocol-edge work must validate the modern protocol version and the MCP routing headers against the JSON-RPC body before forwarding, while preserving unknown extension fields and `_meta` data.
+Modern requests are stateless and self-contained. Every request must supply the metadata needed to process it without depending on a local mux protocol session or prior request history. Phase 0's deterministic modern fixture is the compatibility oracle for a valid peer; Phase 2 owns strict validation in the production gateway.
 
 For modern traffic:
 
-- `/<namespace>` is the single MCP endpoint;
+- `/<namespace>` is the single MCP endpoint and each request is an independent `POST`;
+- every request carries `params._meta["io.modelcontextprotocol/protocolVersion"] = "2026-07-28"` and `params._meta["io.modelcontextprotocol/clientCapabilities"]`; `clientInfo` is optional;
+- Streamable HTTP requires `MCP-Protocol-Version` to match the body protocol version and `Mcp-Method` to match the JSON-RPC method;
+- `Mcp-Name` mirrors `params.name` for `tools/call` and `prompts/get`, and `params.uri` for `resources/read`;
+- successful modern results include `resultType`; `"complete"` represents a completed final result;
 - arbitrary `/<namespace>/<subpath>` forwarding is not part of the modern contract;
 - the legacy `initialize`/`initialized` handshake is not part of the modern contract;
-- `Mcp-Session-Id` is not part of the modern contract;
+- a legacy `Mcp-Session-Id` header must not become implicit modern protocol/session state;
 - legacy `GET`, `DELETE`, held-open SSE, and message-subpath semantics remain compatibility concerns only where an explicitly supported legacy mode requires them.
+
+Later protocol-edge work must reject malformed or inconsistent modern messages before forwarding while preserving valid unknown extension fields and `_meta` data.
 
 ### 3. Preserve supported legacy eras explicitly, not by implicit protocol repair
 
@@ -217,4 +223,8 @@ Repository authority:
 
 External protocol authority:
 
-- MCP `2026-07-28` release: <https://blog.modelcontextprotocol.io/posts/2026-07-28/>
+- MCP `2026-07-28` base protocol: <https://modelcontextprotocol.io/specification/2026-07-28/basic>
+- MCP `2026-07-28` Streamable HTTP transport: <https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http>
+- MCP `2026-07-28` discovery: <https://modelcontextprotocol.io/specification/2026-07-28/server/discover>
+- MCP `2026-07-28` tools: <https://modelcontextprotocol.io/specification/2026-07-28/server/tools>
+- Release announcement (supplemental): <https://blog.modelcontextprotocol.io/posts/2026-07-28/>
