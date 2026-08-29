@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -62,15 +62,15 @@ def modern_headers(method: str = "tools/list", name: str | None = None) -> dict[
 def test_parse_rejects_malformed_batch_and_missing_jsonrpc():
     with pytest.raises(ProtocolRequestError) as malformed:
         parse_jsonrpc_request(b"{")
-    assert getattr(malformed.value, "code") == PARSE_ERROR
+    assert malformed.value.code == PARSE_ERROR
 
     with pytest.raises(ProtocolRequestError) as batch:
         parse_jsonrpc_request(b'[{"jsonrpc":"2.0","method":"tools/list"}]')
-    assert getattr(batch.value, "code") == INVALID_REQUEST
+    assert batch.value.code == INVALID_REQUEST
 
     with pytest.raises(ProtocolRequestError) as repaired:
         parse_jsonrpc_request(b'{"id":1,"method":"tools/list","params":{}}')
-    assert getattr(repaired.value, "code") == INVALID_REQUEST
+    assert repaired.value.code == INVALID_REQUEST
 
 
 def test_protocol_validation_preserves_legacy_and_enforces_modern_headers():
@@ -88,7 +88,7 @@ def test_protocol_validation_preserves_legacy_and_enforces_modern_headers():
             request,
             {"MCP-Protocol-Version": MODERN_PROTOCOL_VERSION},
         )
-    assert getattr(missing_method.value, "code") == HEADER_MISMATCH
+    assert missing_method.value.code == HEADER_MISMATCH
 
 
 def test_modern_name_validation_supports_base64_sentinel():
@@ -103,7 +103,7 @@ def test_modern_missing_meta_and_unsupported_version_are_distinct():
     missing = parse_jsonrpc_request(b'{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
     with pytest.raises(ProtocolRequestError) as missing_error:
         validate_protocol_request(missing, modern_headers())
-    assert getattr(missing_error.value, "code") == INVALID_PARAMS
+    assert missing_error.value.code == INVALID_PARAMS
 
     unsupported = modern_body()
     meta = unsupported["params"]["_meta"]
@@ -113,8 +113,8 @@ def test_modern_missing_meta_and_unsupported_version_are_distinct():
     headers["MCP-Protocol-Version"] = "2099-01-01"
     with pytest.raises(ProtocolRequestError) as unsupported_error:
         validate_protocol_request(request, headers)
-    assert getattr(unsupported_error.value, "code") == UNSUPPORTED_PROTOCOL_VERSION
-    assert getattr(unsupported_error.value, "data") == {"supportedVersions": [MODERN_PROTOCOL_VERSION]}
+    assert unsupported_error.value.code == UNSUPPORTED_PROTOCOL_VERSION
+    assert unsupported_error.value.data == {"supportedVersions": [MODERN_PROTOCOL_VERSION]}
 
 
 @pytest.mark.asyncio
@@ -247,7 +247,7 @@ async def test_invalid_streamable_requests_are_rejected_before_upstream(
     response = await isolated.catch_all_proxy(request)
     assert isinstance(response, JSONResponse)
     assert response.status_code == expected_status
-    assert json.loads(response.body)["error"]["code"] == expected_code
+    assert json.loads(bytes(response.body))["error"]["code"] == expected_code
     fake_client.stream.assert_not_called()
 
 
@@ -450,8 +450,9 @@ async def test_downstream_stream_close_closes_upstream_response_context():
 
     response = await isolated.catch_all_proxy(request)
     assert isinstance(response, StreamingResponse)
-    first_event = await anext(response.body_iterator)
+    body_iterator = cast(AsyncGenerator[bytes, None], response.body_iterator)
+    first_event = await anext(body_iterator)
     assert b": keepalive" in first_event
     assert b"id: 1" in first_event
-    await cast(Any, response.body_iterator).aclose()
+    await body_iterator.aclose()
     stream_context.__aexit__.assert_awaited_once()

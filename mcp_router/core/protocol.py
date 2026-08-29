@@ -3,9 +3,10 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Mapping
+from typing import Any
 
 MODERN_PROTOCOL_VERSION = "2026-07-28"
 PROTOCOL_VERSION_META = "io.modelcontextprotocol/protocolVersion"

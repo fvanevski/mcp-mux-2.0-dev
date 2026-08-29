@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from urllib.parse import urlparse, urlunparse
@@ -68,7 +68,7 @@ class BridgeSession:
 def get_target_url(config_url: str, request_path: str, path_prefix: str) -> str:
     parsed_cfg = urlparse(config_url)
     prefix = f"/{path_prefix}"
-    suffix = request_path[len(prefix) :] if request_path.startswith(prefix) else request_path
+    suffix = request_path.removeprefix(prefix)
 
     cfg_path = parsed_cfg.path.rstrip("/")
     joined_path = cfg_path + suffix
@@ -327,23 +327,20 @@ class MCPRouter:
                     f"Request body exceeds {self.max_request_body_bytes} byte limit",
                 )
 
-        try:
-            if hasattr(request, "_receive"):
-                chunks: list[bytes] = []
-                body_size = 0
-                async for chunk in request.stream():
-                    body_size += len(chunk)
-                    if body_size > self.max_request_body_bytes:
-                        return _transport_error_response(
-                            413,
-                            f"Request body exceeds {self.max_request_body_bytes} byte limit",
-                        )
-                    chunks.append(chunk)
-                body = b"".join(chunks)
-            else:
-                body = await request.body()
-        except ClientDisconnect:
-            raise
+        if hasattr(request, "_receive"):
+            chunks: list[bytes] = []
+            body_size = 0
+            async for chunk in request.stream():
+                body_size += len(chunk)
+                if body_size > self.max_request_body_bytes:
+                    return _transport_error_response(
+                        413,
+                        f"Request body exceeds {self.max_request_body_bytes} byte limit",
+                    )
+                chunks.append(chunk)
+            body = b"".join(chunks)
+        else:
+            body = await request.body()
 
         if len(body) > self.max_request_body_bytes:
             return _transport_error_response(
@@ -422,8 +419,6 @@ class MCPRouter:
                     )
 
                 yield render_sse_event(transform_sse_event(event, transform))
-        except asyncio.CancelledError:
-            raise
         finally:
             if response is not None:
                 await stream_context.__aexit__(None, None, None)
@@ -438,7 +433,7 @@ class MCPRouter:
         session_id: str,
         queue: asyncio.Queue[str],
         path_prefix: str,
-    ) -> AsyncIterator[bytes]:
+    ) -> AsyncGenerator[bytes, None]:
         self.active_connections[path_prefix] = self.active_connections.get(path_prefix, 0) + 1
         client_post_uri = f"/{path_prefix}?session_id={session_id}"
         yield f"event: endpoint\ndata: {client_post_uri}\n\n".encode()
@@ -446,8 +441,6 @@ class MCPRouter:
             while True:
                 line = await queue.get()
                 yield (line + "\n").encode("utf-8")
-        except asyncio.CancelledError:
-            raise
         finally:
             self.active_sessions.pop(session_id, None)
             self.active_connections[path_prefix] = max(
@@ -618,8 +611,6 @@ class MCPRouter:
                             ),
                         )
                         yield render_sse_event(transformed)
-                except asyncio.CancelledError:
-                    raise
                 finally:
                     await stream_context.__aexit__(None, None, None)
 
@@ -639,8 +630,6 @@ class MCPRouter:
             try:
                 async for chunk in response.aiter_bytes():
                     yield chunk
-            except asyncio.CancelledError:
-                raise
             finally:
                 await stream_context.__aexit__(None, None, None)
 

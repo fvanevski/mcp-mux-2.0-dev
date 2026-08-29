@@ -2,7 +2,7 @@
 
 `mcp_router/config.yaml` is validated before an endpoint definition can become active. The accepted endpoint modes are intentionally limited to behavior implemented by the router: `remote` and `managed_cli`. Historical `stdio_bridge` configuration is rejected.
 
-At router scope, `max_request_body_bytes` bounds JSON-RPC POST bodies before they can be forwarded. It defaults to 1 MiB (`1048576`) and accepts values from 1 KiB through 64 MiB. The limit applies after any declared `Content-Length` precheck and again to the actual buffered request body.
+At router scope, `max_request_body_bytes` bounds JSON-RPC POST bodies before they can be forwarded. It defaults to 1 MiB (`1048576`) and accepts values from 1 KiB through 64 MiB. The limit applies after any declared `Content-Length` precheck and again while the actual request body is streamed.
 
 ## Common endpoint fields
 
