@@ -106,22 +106,15 @@ def filter_tools_response(
         data = json.loads(json_str)
         if isinstance(data, dict) and "result" in data:
             result = data["result"]
-            if isinstance(result, dict) and isinstance(result.get("tools"), list):
+            if isinstance(result, dict) and "tools" in result and isinstance(result["tools"], list):
                 original_tools = result["tools"]
+                filtered_tools = []
                 if allowed_tools is not None:
                     allowed_set = set(allowed_tools)
-                    filtered_tools = [
-                        tool
-                        for tool in original_tools
-                        if isinstance(tool, dict) and tool.get("name") in allowed_set
-                    ]
+                    filtered_tools = [tool for tool in original_tools if tool.get("name") in allowed_set]
                 elif denied_tools is not None:
                     denied_set = set(denied_tools)
-                    filtered_tools = [
-                        tool
-                        for tool in original_tools
-                        if not isinstance(tool, dict) or tool.get("name") not in denied_set
-                    ]
+                    filtered_tools = [tool for tool in original_tools if tool.get("name") not in denied_set]
                 else:
                     filtered_tools = original_tools
 
