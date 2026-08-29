@@ -328,7 +328,20 @@ class MCPRouter:
                 )
 
         try:
-            body = await request.body()
+            if hasattr(request, "_receive"):
+                chunks: list[bytes] = []
+                body_size = 0
+                async for chunk in request.stream():
+                    body_size += len(chunk)
+                    if body_size > self.max_request_body_bytes:
+                        return _transport_error_response(
+                            413,
+                            f"Request body exceeds {self.max_request_body_bytes} byte limit",
+                        )
+                    chunks.append(chunk)
+                body = b"".join(chunks)
+            else:
+                body = await request.body()
         except ClientDisconnect:
             raise
 

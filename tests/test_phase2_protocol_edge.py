@@ -286,6 +286,51 @@ async def test_wrong_content_type_and_oversize_are_rejected_before_upstream():
 
 
 @pytest.mark.asyncio
+async def test_chunked_request_body_is_bounded_while_reading():
+    isolated = MCPRouter(Starlette(), "/tmp/not-used.yaml")
+    isolated.max_request_body_bytes = 64
+    isolated._configs = {
+        "example": EndpointConfig(
+            path="example",
+            mode="remote",
+            url="https://upstream.test/mcp",
+            summary="Example",
+            transport="streamable-http",
+        )
+    }
+    messages = [
+        {"type": "http.request", "body": b"a" * 40, "more_body": True},
+        {"type": "http.request", "body": b"b" * 40, "more_body": False},
+    ]
+
+    async def receive() -> dict[str, Any]:
+        return messages.pop(0)
+
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/example",
+        "raw_path": b"/example",
+        "query_string": b"",
+        "headers": [(b"content-type", b"application/json")],
+        "client": ("127.0.0.1", 1),
+        "server": ("test", 80),
+        "path_params": {"path_prefix": "example"},
+    }
+    request = Request(scope, receive)
+    fake_client = MagicMock()
+    fake_client.is_closed = False
+    fake_client.stream = MagicMock()
+    isolated._http_client = cast(httpx.AsyncClient, fake_client)
+
+    response = await isolated.catch_all_proxy(request)
+    assert response.status_code == 413
+    fake_client.stream.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_valid_modern_request_forwards_original_bytes_unknown_fields_and_timeout():
     isolated = MCPRouter(Starlette(), "/tmp/not-used.yaml")
     isolated._configs = {

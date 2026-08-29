@@ -189,10 +189,10 @@ def validate_protocol_request(
             request.request_id,
         )
 
-    name_field = _NAMED_METHOD_FIELDS.get(request.method)
-    if name_field is not None:
-        body_name = request.params.get(name_field)
-        if not isinstance(body_name, str) or not body_name:
+    body_name = extract_request_name(request)
+    if request.method in _NAMED_METHOD_FIELDS:
+        if body_name is None:
+            name_field = _NAMED_METHOD_FIELDS[request.method]
             raise ProtocolRequestError(
                 INVALID_PARAMS,
                 f"{request.method} requires string params.{name_field}",
@@ -207,6 +207,14 @@ def validate_protocol_request(
             )
 
     return era
+
+
+def extract_request_name(request: ParsedJSONRPCRequest) -> str | None:
+    name_field = _NAMED_METHOD_FIELDS.get(request.method)
+    if name_field is None:
+        return None
+    value = request.params.get(name_field)
+    return value if isinstance(value, str) and value else None
 
 
 def _request_id(value: Any) -> str | int:
