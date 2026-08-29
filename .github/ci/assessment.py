@@ -105,7 +105,7 @@ def check_version(
     if proc.returncode:
         raise Stop("INFRA_ERROR", f"failed to query version: {executable}")
     observed = (proc.stdout or proc.stderr).strip()
-    if expected not in observed:
+    if observed != expected:
         raise Stop("INFRA_ERROR", f"version mismatch: expected {expected!r}, observed {observed!r}")
     print(observed, file=sys.stderr)
     return observed

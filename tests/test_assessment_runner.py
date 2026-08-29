@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
+from typing import cast
+
+import pytest
 
 RUNNER = Path(__file__).parents[1] / ".github" / "ci" / "assessment.py"
 CANONICAL_KEYS = {
@@ -49,6 +55,29 @@ def _assert_canonical_evidence(evidence: dict[str, object]) -> None:
     assert evidence["schema_version"] == 1
     assert evidence["gate_decision"] == "NOT_EVALUATED"
     assert isinstance(evidence["warnings"], list)
+
+
+def _load_runner_module() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("phase0_assessment_runner", RUNNER)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_runner_version_check_requires_exact_match(tmp_path: Path):
+    module = _load_runner_module()
+    check_version = cast(Callable[..., str], getattr(module, "check_version"))
+    executable = tmp_path / "ruff"
+    executable.write_text("#!/usr/bin/env python3\nprint('ruff 0.16.50')\n", encoding="utf-8")
+    executable.chmod(0o755)
+
+    with pytest.raises(RuntimeError, match="version mismatch"):
+        check_version(executable, "ruff 0.16.5", repo=tmp_path, timeout=10)
+
+    executable.write_text("#!/usr/bin/env python3\nprint('ruff 0.16.5')\n", encoding="utf-8")
+    assert check_version(executable, "ruff 0.16.5", repo=tmp_path, timeout=10) == "ruff 0.16.5"
 
 
 def test_runner_invalid_sha_uses_canonical_blocked_evidence():

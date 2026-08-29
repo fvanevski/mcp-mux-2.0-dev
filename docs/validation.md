@@ -18,12 +18,14 @@ The runner binds assessment to:
 - explicit exact 40-character `--expected-head-sha`;
 - the current Git branch and clean worktree;
 - `.python-version`;
-- repository-local `.venv`;
+- a pre-existing canonical `.venv` selected by `--venv` (default: `<assessment-worktree>/.venv`);
 - `.github/ci/toolchain.txt`;
 - `uv.lock`;
 - `.github/ci/changed-python.sh`.
 
-The local `.venv` must already contain the exact static/test tools declared by `.github/ci/toolchain.txt`. Environment construction remains outside the runner so assessment never mutates the candidate merely to obtain green output.
+The selected `.venv` must already contain the exact static/test tools declared by `.github/ci/toolchain.txt`; version comparison is exact, not prefix/substr matching. Environment construction remains outside the runner so assessment never mutates the candidate merely to obtain green output.
+
+For an isolated assessment worktree, a worktree-local `.venv` will normally be absent. In that case Central may supply the absolute path of the already-established canonical host `.venv` and the assessment must pass it explicitly with `--venv`. Do not create or repair a new environment inside the assessment worktree merely to make the run pass.
 
 ## Target kinds
 
@@ -67,7 +69,8 @@ Use `plan` first:
 .github/ci/assessment.py plan pr \
   --base-sha "$BASE_SHA" \
   --expected-head-sha "$HEAD_SHA" \
-  --pr-number "$PR_NUMBER"
+  --pr-number "$PR_NUMBER" \
+  --venv "$ASSESSMENT_VENV"
 ```
 
 `plan` performs admission/preflight, verifies repository/toolchain identity, and emits the changed-Python membership. It does not execute validation checks and reports:
@@ -84,6 +87,7 @@ Then execute the same identity with `run`:
   --base-sha "$BASE_SHA" \
   --expected-head-sha "$HEAD_SHA" \
   --pr-number "$PR_NUMBER" \
+  --venv "$ASSESSMENT_VENV" \
   --output /tmp/mcp-mux-pr-evidence.json
 ```
 
