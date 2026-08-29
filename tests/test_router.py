@@ -218,6 +218,10 @@ async def test_wait_for_port_bounds_connection_attempt_by_remaining_deadline(mon
     pm = ProcessManager()
     wait_for_timeouts: list[float] = []
 
+    class FakeLoop:
+        def time(self) -> float:
+            return 0.0
+
     async def pending_connection(host: str, port: int):
         await asyncio.Event().wait()
 
@@ -226,6 +230,7 @@ async def test_wait_for_port_bounds_connection_attempt_by_remaining_deadline(mon
         awaitable.close()
         raise TimeoutError
 
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: FakeLoop())
     monkeypatch.setattr(asyncio, "open_connection", pending_connection)
     monkeypatch.setattr(asyncio, "wait_for", force_timeout)
 
