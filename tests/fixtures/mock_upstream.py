@@ -6,6 +6,12 @@ from typing import Literal
 
 import httpx
 
+MODERN_PROTOCOL_VERSION = "2026-07-28"
+PROTOCOL_VERSION_META = "io.modelcontextprotocol/protocolVersion"
+CLIENT_INFO_META = "io.modelcontextprotocol/clientInfo"
+CLIENT_CAPABILITIES_META = "io.modelcontextprotocol/clientCapabilities"
+SERVER_INFO_META = "io.modelcontextprotocol/serverInfo"
+
 MockMode = Literal[
     "modern-stateless",
     "legacy-sessionful",
@@ -76,6 +82,24 @@ class MockMCPUpstream:
             content=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
         )
 
+    @classmethod
+    def _jsonrpc_error(
+        cls,
+        request_id: object,
+        *,
+        code: int,
+        message: str,
+        status_code: int = 400,
+        data: object | None = None,
+    ) -> httpx.Response:
+        error: dict[str, object] = {"code": code, "message": message}
+        if data is not None:
+            error["data"] = data
+        return cls._json_response(
+            {"jsonrpc": "2.0", "id": request_id, "error": error},
+            status_code=status_code,
+        )
+
     def _handle(self, request: httpx.Request) -> httpx.Response:
         headers, json_body = self._record(request)
 
@@ -94,36 +118,115 @@ class MockMCPUpstream:
         json_body: object | None,
     ) -> httpx.Response:
         if request.method != "POST" or request.url.path != "/mcp":
-            return self._json_response({"error": "modern endpoint is POST /mcp"}, status_code=405)
+            return self._jsonrpc_error(
+                None,
+                code=-32600,
+                message="modern endpoint is POST /mcp",
+                status_code=405,
+            )
         if not isinstance(json_body, dict):
-            return self._json_response({"error": "JSON-RPC object required"}, status_code=400)
-        if headers.get("mcp-protocol-version") != "2026-07-28":
-            return self._json_response({"error": "missing protocol version"}, status_code=400)
-        if headers.get("mcp-method") != json_body.get("method"):
-            return self._json_response({"error": "method header mismatch"}, status_code=400)
-        if "mcp-session-id" in headers:
-            return self._json_response({"error": "modern requests are stateless"}, status_code=400)
+            return self._jsonrpc_error(None, code=-32600, message="JSON-RPC object required")
 
+        request_id = json_body.get("id")
         method = json_body.get("method")
-        params = json_body.get("params") if isinstance(json_body.get("params"), dict) else {}
-        if (
-            method in {"tools/call", "resources/read", "prompts/get"}
-            and headers.get("mcp-name") != params.get("name")
-        ):
-            return self._json_response({"error": "name header mismatch"}, status_code=400)
+        if json_body.get("jsonrpc") != "2.0" or not isinstance(request_id, (str, int)):
+            return self._jsonrpc_error(request_id, code=-32600, message="valid JSON-RPC request required")
+        if not isinstance(method, str):
+            return self._jsonrpc_error(request_id, code=-32600, message="method is required")
+
+        params = json_body.get("params")
+        if not isinstance(params, dict):
+            return self._jsonrpc_error(request_id, code=-32602, message="params object required")
+        meta = params.get("_meta")
+        if not isinstance(meta, dict):
+            return self._jsonrpc_error(request_id, code=-32602, message="per-request _meta is required")
+
+        body_version = meta.get(PROTOCOL_VERSION_META)
+        if not isinstance(body_version, str):
+            return self._jsonrpc_error(
+                request_id,
+                code=-32602,
+                message=f"missing required {PROTOCOL_VERSION_META}",
+            )
+        client_capabilities = meta.get(CLIENT_CAPABILITIES_META)
+        if not isinstance(client_capabilities, dict):
+            return self._jsonrpc_error(
+                request_id,
+                code=-32602,
+                message=f"missing required {CLIENT_CAPABILITIES_META}",
+            )
+        if body_version != MODERN_PROTOCOL_VERSION:
+            return self._jsonrpc_error(
+                request_id,
+                code=-32022,
+                message="unsupported protocol version",
+                data={"supportedVersions": [MODERN_PROTOCOL_VERSION]},
+            )
+        if headers.get("mcp-protocol-version") != body_version:
+            return self._jsonrpc_error(
+                request_id,
+                code=-32020,
+                message="MCP-Protocol-Version header mismatch",
+            )
+        if headers.get("mcp-method") != method:
+            return self._jsonrpc_error(request_id, code=-32020, message="Mcp-Method header mismatch")
+
+        name_source: object | None = None
+        if method in {"tools/call", "prompts/get"}:
+            name_source = params.get("name")
+        elif method == "resources/read":
+            name_source = params.get("uri")
+        if name_source is not None and headers.get("mcp-name") != name_source:
+            return self._jsonrpc_error(request_id, code=-32020, message="Mcp-Name header mismatch")
+        if method in {"tools/call", "prompts/get", "resources/read"} and not isinstance(name_source, str):
+            return self._jsonrpc_error(request_id, code=-32602, message="named operation source is required")
 
         if method == "server/discover":
-            result = {"protocolVersion": "2026-07-28", "capabilities": {"tools": {}}}
+            result = {
+                "resultType": "complete",
+                "supportedVersions": [MODERN_PROTOCOL_VERSION],
+                "capabilities": {"tools": {}},
+                "_meta": {
+                    SERVER_INFO_META: {
+                        "name": "phase0-modern-mock",
+                        "version": "0",
+                    }
+                },
+                "ttlMs": 300000,
+                "cacheScope": "public",
+            }
         elif method == "tools/list":
-            result = {"tools": [{"name": "baseline_tool", "description": "deterministic fixture"}]}
+            result = {
+                "resultType": "complete",
+                "tools": [
+                    {
+                        "name": "baseline_tool",
+                        "description": "deterministic fixture",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": True,
+                        },
+                    }
+                ],
+                "ttlMs": 300000,
+                "cacheScope": "public",
+            }
         elif method == "tools/call":
-            result = {"content": [{"type": "text", "text": "baseline-ok"}]}
+            result = {
+                "resultType": "complete",
+                "content": [{"type": "text", "text": "baseline-ok"}],
+                "isError": False,
+            }
+        elif method == "resources/read":
+            result = {
+                "resultType": "complete",
+                "contents": [{"uri": name_source, "text": "baseline-resource"}],
+            }
         else:
-            result = {"echoMethod": method}
+            result = {"resultType": "complete", "echoMethod": method}
 
-        return self._json_response(
-            {"jsonrpc": "2.0", "id": json_body.get("id"), "result": result}
-        )
+        return self._json_response({"jsonrpc": "2.0", "id": request_id, "result": result})
 
     def _handle_legacy_sessionful(
         self,
@@ -155,7 +258,15 @@ class MockMCPUpstream:
             return self._json_response({"error": "legacy session id required"}, status_code=400)
 
         if method == "tools/list":
-            result = {"tools": [{"name": "legacy_tool", "description": "deterministic fixture"}]}
+            result = {
+                "tools": [
+                    {
+                        "name": "legacy_tool",
+                        "description": "deterministic fixture",
+                        "inputSchema": {"type": "object", "properties": {}},
+                    }
+                ]
+            }
         else:
             result = {"echoMethod": method}
         return self._json_response(

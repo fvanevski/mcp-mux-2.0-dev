@@ -131,14 +131,14 @@ def changed_python(repo: Path, base: str, head: str, timeout: int) -> list[str]:
     return files
 
 
-def safe_output(path: Path | None, repo: Path) -> None:
+def safe_output(path: Path | None, repo: Path) -> Path | None:
     if path is None:
-        return
+        return None
     resolved = path.expanduser().resolve()
     try:
         resolved.relative_to(repo)
     except ValueError:
-        return
+        return resolved
     raise Stop("BLOCKED", "--output must be outside the repository")
 
 
@@ -302,19 +302,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    base = exact_sha(args.base_sha, "base SHA")
-    head = exact_sha(args.expected_head_sha, "expected head SHA")
-    if args.timeout < 1:
-        raise Stop("BLOCKED", "--timeout must be positive")
-
-    repo = root()
-    safe_output(args.output, repo)
     runner_sha = sha256(Path(__file__).resolve())
+    requested_base = args.base_sha.lower()
+    requested_head = args.expected_head_sha.lower()
+
+    repo: Path | None = None
+    base: str | None = None
+    head: str | None = None
+    output: Path | None = None
+    output_allowed = False
     state: dict[str, object] = {
         "branch": None,
         "observed_head_sha": None,
-        "venv": os.fspath((repo / args.venv).resolve()),
-        "python_executable": os.fspath((repo / args.venv / "bin" / "python").resolve()),
+        "venv": None,
+        "python_executable": None,
         "python_version": None,
         "python_policy": None,
         "changed_python": [],
@@ -326,23 +327,44 @@ def main() -> int:
     warnings: list[str] = []
 
     try:
+        base = exact_sha(requested_base, "base SHA")
+        head = exact_sha(requested_head, "expected head SHA")
+        if args.timeout < 1:
+            raise Stop("BLOCKED", "--timeout must be positive")
+
+        repo = root()
+        venv = (repo / args.venv).resolve() if not args.venv.is_absolute() else args.venv.resolve()
+        state["venv"] = os.fspath(venv)
+        state["python_executable"] = os.fspath(venv / "bin" / "python")
+        output = safe_output(args.output, repo)
+        output_allowed = output is not None
+
         state.update(preflight(args, repo, base, head))
         if args.action == "run":
-            result, checks, warnings = run_checks(args, repo, base, head, state)
+            result, checks, run_warnings = run_checks(args, repo, base, head, state)
+            warnings.extend(run_warnings)
     except Stop as exc:
         result = exc.result
         warnings.append(str(exc))
+    except Exception as exc:
+        result = "INFRA_ERROR"
+        warnings.append(f"unexpected runner error: {type(exc).__name__}: {exc}")
 
+    assessment_id = (
+        identity(args, base, head, runner_sha, state)
+        if base is not None and head is not None
+        else None
+    )
     evidence = {
         "schema_version": 1,
-        "assessment_id": identity(args, base, head, runner_sha, state),
+        "assessment_id": assessment_id,
         "action": args.action,
         "target": args.target,
         "pr_number": args.pr_number,
-        "repo_root": os.fspath(repo),
+        "repo_root": os.fspath(repo) if repo is not None else None,
         "branch": state["branch"],
-        "base_sha": base,
-        "expected_head_sha": head,
+        "base_sha": base if base is not None else requested_base,
+        "expected_head_sha": head if head is not None else requested_head,
         "observed_head_sha": state["observed_head_sha"],
         "python_executable": state["python_executable"],
         "python_policy": state["python_policy"],
@@ -357,20 +379,24 @@ def main() -> int:
         "gate_decision": "NOT_EVALUATED",
         "warnings": warnings,
     }
+
+    if output_allowed and output is not None:
+        payload = json.dumps(evidence, sort_keys=True, indent=2) + "\n"
+        try:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(payload, encoding="utf-8")
+            print(f"evidence_path={output}", file=sys.stderr)
+            print(f"evidence_sha256={hashlib.sha256(payload.encode()).hexdigest()}", file=sys.stderr)
+        except Exception as exc:
+            result = "INFRA_ERROR"
+            warnings.append(f"failed to write evidence output: {type(exc).__name__}: {exc}")
+            evidence["host_evidence_result"] = result
+            evidence["warnings"] = warnings
+
     payload = json.dumps(evidence, sort_keys=True, indent=2) + "\n"
-    if args.output is not None:
-        output = args.output.expanduser().resolve()
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(payload, encoding="utf-8")
-        print(f"evidence_path={output}", file=sys.stderr)
-        print(f"evidence_sha256={hashlib.sha256(payload.encode()).hexdigest()}", file=sys.stderr)
     print(payload, end="")
     return EXIT[result]
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except Stop as exc:
-        print(json.dumps({"host_evidence_result": exc.result, "error": str(exc)}))
-        raise SystemExit(EXIT[exc.result])
+    raise SystemExit(main())
