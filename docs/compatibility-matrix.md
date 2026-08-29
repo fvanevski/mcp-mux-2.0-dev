@@ -105,7 +105,7 @@ Primary protocol references:
 | `M-ST-09` | A legacy session header is not used as modern protocol state. | Fixture authority / target | `test_modern_fixture_does_not_use_legacy_session_header_for_protocol_state` |
 | `M-ST-10` | Successful fixture responses include `resultType`; listed tools include `inputSchema`. | Fixture authority | operator scenario assertions |
 
-The fixture validates a correct modern peer. Production rejection of malformed/mismatched modern traffic remains Phase 2 work; Phase 0 does not falsely assert that the current router already performs that validation.
+The fixture remains the deterministic oracle for a correct modern peer. Phase 2 adds the production gateway validation that rejects malformed or mismatched modern traffic before forwarding, while the Phase 0 fixture continues to provide independent upstream-side compatibility evidence.
 
 ### B. Legacy sessionful Streamable HTTP
 
@@ -136,12 +136,12 @@ The fixture validates a correct modern peer. Production rejection of malformed/m
 | `BR-05` | Removing/changing an endpoint drops its bridge sessions. | Current reload invariant | existing configuration regression |
 | `BR-06` | Bridge resources become bounded/cancellable/observable. | Future target | Phase 5 |
 
-### E. Current protocol repair and response projection
+### E. Protocol validation and response projection
 
 | Claim ID | Baseline claim | Classification | Test evidence |
 |---|---|---|---|
-| `CUR-01` | Current router inserts missing `jsonrpc: "2.0"` into request dictionaries with a method. | Current defect/compatibility behavior scheduled to break | existing regression |
-| `CUR-02` | Current router repairs qualifying batch items. | Current behavior scheduled to break | existing regression |
+| `CUR-01` | The Phase 2 edge rejects a request object missing `jsonrpc: "2.0"`; it does not repair or forward it. | Intended v0.2.0 breaking change | `test_streamable_http_direct_post_rejects_missing_jsonrpc_version` + Phase 2 protocol-edge regressions |
+| `CUR-02` | The Phase 2 edge rejects JSON-RPC batch bodies instead of repairing or forwarding batch items. | Intended v0.2.0 breaking change | `test_streamable_http_direct_post_rejects_jsonrpc_batch` + Phase 2 protocol-edge regressions |
 | `CUR-03` | Current tool policy projects `tools/list` with allow/deny lists. | Current behavior | existing filter tests |
 | `CUR-04` | Tool-list projection does not prove direct-call authorization. | Known security defect | Phase 3 |
 | `CUR-05` | Rebuilt JSON responses strip stale encoding/length headers. | Current response-safety behavior | existing regression |
@@ -185,7 +185,7 @@ PRESERVATION_INVARIANTS:
 
 ## Intended v0.2.0 breaking changes
 
-Later phases intentionally:
+The v0.2.0 phases intentionally:
 
 - reject malformed JSON-RPC and Streamable HTTP batches rather than repairing them;
 - enforce the modern per-request metadata and routing-header contract;

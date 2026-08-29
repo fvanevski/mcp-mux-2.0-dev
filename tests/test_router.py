@@ -559,7 +559,7 @@ async def test_proxy_headers_forwarding():
         
         with patch("httpx.AsyncClient.stream", return_value=mock_stream) as mock_stream_call:
             response = await client.post(
-                "/weather/tools/list",
+                "/weather",
                 json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
                 headers={"X-Override": "client-value", "X-Client-Header": "only-client"}
             )
@@ -608,7 +608,7 @@ async def test_proxy_strips_encoding_headers_from_decoded_json_response():
 
         with patch("httpx.AsyncClient.stream", return_value=mock_stream):
             response = await client.post(
-                "/weather/tools/list",
+                "/weather",
                 json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
             )
 
@@ -657,7 +657,7 @@ async def test_streamable_http_direct_post_accepts_json_only_clients():
 
 
 @pytest.mark.asyncio
-async def test_streamable_http_direct_post_adds_missing_jsonrpc_version():
+async def test_streamable_http_direct_post_rejects_missing_jsonrpc_version():
     router._configs = {
         "huggingface": EndpointConfig(
             path="huggingface",
@@ -688,13 +688,13 @@ async def test_streamable_http_direct_post_adds_missing_jsonrpc_version():
                 headers={"Accept": "application/json"}
             )
 
-    assert response.status_code == 200
-    forwarded = json.loads(mock_stream_call.call_args[1]["content"])
-    assert forwarded == {"id": 1, "method": "initialize", "params": {}, "jsonrpc": "2.0"}
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == -32600
+    mock_stream_call.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_streamable_http_direct_post_adds_missing_jsonrpc_version_to_batch_items():
+async def test_streamable_http_direct_post_rejects_jsonrpc_batch():
     router._configs = {
         "huggingface": EndpointConfig(
             path="huggingface",
@@ -729,11 +729,9 @@ async def test_streamable_http_direct_post_adds_missing_jsonrpc_version_to_batch
                 headers={"Accept": "application/json"}
             )
 
-    assert response.status_code == 200
-    forwarded = json.loads(mock_stream_call.call_args[1]["content"])
-    assert forwarded[0]["jsonrpc"] == "2.0"
-    assert forwarded[1]["jsonrpc"] == "2.0"
-    assert forwarded[2] == {"not": "rpc"}
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == -32600
+    mock_stream_call.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -816,7 +814,7 @@ async def test_streamable_http_direct_response_json():
     mock_req_init = MagicMock(spec=Request)
     mock_req_init.method = "POST"
     mock_req_init.path_params = {"path_prefix": "huggingface"}
-    mock_req_init.url.path = "/huggingface/initialize"
+    mock_req_init.url.path = "/huggingface"
     mock_req_init.headers = {"accept": "application/json", "content-type": "application/json"}
     mock_req_init.query_params = {"session_id": local_session_id}
     mock_req_init.body = AsyncMock(return_value=b'{"jsonrpc":"2.0","id":1,"method":"initialize"}')
@@ -861,7 +859,7 @@ async def test_streamable_http_direct_response_json():
     mock_req_tools = MagicMock(spec=Request)
     mock_req_tools.method = "POST"
     mock_req_tools.path_params = {"path_prefix": "huggingface"}
-    mock_req_tools.url.path = "/huggingface/tools/list"
+    mock_req_tools.url.path = "/huggingface"
     mock_req_tools.headers = {"accept": "application/json", "content-type": "application/json"}
     mock_req_tools.query_params = {"session_id": local_session_id}
     mock_req_tools.body = AsyncMock(return_value=b'{"jsonrpc":"2.0","id":2,"method":"tools/list"}')
@@ -918,7 +916,7 @@ async def test_streamable_http_rejects_session_for_different_endpoint():
     mock_req = MagicMock(spec=Request)
     mock_req.method = "POST"
     mock_req.path_params = {"path_prefix": "huggingface"}
-    mock_req.url.path = "/huggingface/tools/list"
+    mock_req.url.path = "/huggingface"
     mock_req.headers = {"accept": "application/json", "content-type": "application/json"}
     mock_req.query_params = {"session_id": local_session_id}
     mock_req.body = AsyncMock(return_value=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
