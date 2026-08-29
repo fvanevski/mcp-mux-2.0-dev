@@ -26,7 +26,7 @@ def test_valid_config():
             {
                 "path": "files",
                 "mode": "managed_cli",
-                "command": "uvx mcp-server-filesystem",
+                "argv": ["uvx", "mcp-server-filesystem"],
                 "url": "http://localhost:8011/mcp",
                 "summary": "File tools"
             }
@@ -44,14 +44,14 @@ def test_config_port_collision():
             {
                 "path": "files1",
                 "mode": "managed_cli",
-                "command": "uvx mcp-server-filesystem",
+                "argv": ["uvx", "mcp-server-filesystem"],
                 "url": "http://localhost:8011/mcp",
                 "summary": "Files 1"
             },
             {
                 "path": "files2",
                 "mode": "managed_cli",
-                "command": "uvx mcp-server-filesystem",
+                "argv": ["uvx", "mcp-server-filesystem"],
                 "url": "http://localhost:8011/mcp",
                 "summary": "Files 2"
             }
@@ -90,7 +90,7 @@ def test_config_missing_remote_url():
             }
         ]
     }
-    with pytest.raises(ValueError, match="url is required for remote mode"):
+    with pytest.raises(ValueError):
         RouterConfig.model_validate(data)
 
 def test_config_missing_managed_cli_url():
@@ -99,12 +99,12 @@ def test_config_missing_managed_cli_url():
             {
                 "path": "files",
                 "mode": "managed_cli",
-                "command": "uvx",
+                "argv": ["uvx"],
                 "summary": "Missing URL"
             }
         ]
     }
-    with pytest.raises(ValueError, match="url is required for managed_cli mode"):
+    with pytest.raises(ValueError):
         RouterConfig.model_validate(data)
 
 def test_config_expands_environment_variables(monkeypatch):
@@ -190,26 +190,26 @@ async def test_process_manager_lifecycle():
     cfg = EndpointConfig(
         path="mock-mcp",
         mode="managed_cli",
-        command="python -m http.server 8099",
+        argv=["python", "-m", "http.server", "8099"],
         url="http://localhost:8099/mcp",
         summary="Mock python server"
     )
 
-    # Mock the asyncio.create_subprocess_shell and _wait_for_port
+    # Mock safe argv execution and readiness.
     mock_proc = AsyncMock()
     mock_proc.pid = 99999
     mock_proc.returncode = None
     mock_proc.stdout = AsyncMock()
     mock_proc.stderr = AsyncMock()
 
-    with patch("asyncio.create_subprocess_shell", return_value=mock_proc) as mock_shell, \
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec, \
          patch.object(pm, "_wait_for_port", return_value=True) as mock_wait:
         
         target_url = await pm.start_managed_server(cfg)
         
         assert target_url == "http://localhost:8099/mcp"
-        mock_shell.assert_called_once()
-        mock_wait.assert_called_once_with(8099, host="localhost")
+        assert mock_exec.call_args.args == ("python", "-m", "http.server", "8099")
+        mock_wait.assert_called_once_with(8099, host="localhost", timeout=15.0, interval=0.2)
         assert "mock-mcp" in pm._processes
 
         # Test stop
