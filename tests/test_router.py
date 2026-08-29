@@ -187,6 +187,33 @@ def test_config_normalizes_duplicate_bearer_authorization(monkeypatch):
 # --- Process Manager Tests ---
 
 @pytest.mark.asyncio
+async def test_wait_for_port_caps_sleep_at_readiness_deadline(monkeypatch):
+    pm = ProcessManager()
+    now = 0.0
+    sleep_calls: list[float] = []
+
+    class FakeLoop:
+        def time(self) -> float:
+            return now
+
+    async def fail_connection(host: str, port: int):
+        raise ConnectionRefusedError
+
+    async def advance_time(delay: float):
+        nonlocal now
+        sleep_calls.append(delay)
+        now += delay
+
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: FakeLoop())
+    monkeypatch.setattr(asyncio, "open_connection", fail_connection)
+    monkeypatch.setattr(asyncio, "sleep", advance_time)
+
+    assert await pm._wait_for_port(3033, timeout=1.0, interval=30.0) is False
+    assert sleep_calls == [1.0]
+    assert now == 1.0
+
+
+@pytest.mark.asyncio
 async def test_process_manager_lifecycle():
     pm = ProcessManager()
     # Reset singleton internal state for testing

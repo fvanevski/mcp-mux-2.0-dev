@@ -14,7 +14,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 
-from mcp_router.core.config_loader import RouterConfig, ConfigWatcher, EndpointConfig, load_router_config
+from mcp_router.core.config_loader import ConfigWatcher, Endpoint, RouterConfig, load_router_config
 from mcp_router.core.process_manager import ProcessManager
 
 # Configure logging to console safely
@@ -130,7 +130,7 @@ class MCPRouter:
         self.app = app
         self.config_path = config_path
         self.process_manager = ProcessManager()
-        self._configs: dict[str, EndpointConfig] = {}
+        self._configs: dict[str, Endpoint] = {}
         self.last_activity: dict[str, float] = {}
         self.active_connections: dict[str, int] = {}
         self.locks: dict[str, asyncio.Lock] = {}

@@ -46,7 +46,7 @@ Managed execution is explicit. Prefer structured `argv`; it is executed directly
   summary: "Example managed MCP server"
 ```
 
-`readiness.host` and `readiness.port` default from `url`; `timeout` defaults to 15 seconds and `interval` to 0.2 seconds. Managed readiness ports must be unique across the loaded configuration.
+`readiness.host` and `readiness.port` default from `url`; `timeout` defaults to 15 seconds and `interval` to 0.2 seconds. Readiness polling uses a monotonic deadline: after a failed connection probe, the next sleep is capped to the remaining timeout budget, so an `interval` longer than `timeout` cannot extend the polling delay past that deadline. Managed readiness ports must be unique across the loaded configuration.
 
 Use `unsafe_shell_command` only when shell syntax is intrinsically required, such as sourcing a shell-managed runtime before launching a server. It is mutually exclusive with `argv`:
 
