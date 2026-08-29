@@ -3,48 +3,51 @@
 - **Phase:** Issue #3 — compatibility contract and architecture baseline
 - **Frozen implementation base:** `0d630e7aab347657c7aca108451a0a6850793edb`
 - **Architecture decision:** `docs/architecture/ADR-001-endpoint-gateway.md`
+- **Modern protocol authority:** MCP `2026-07-28`
 
 ## Purpose
 
-This document separates three things that later phases must not conflate:
+This document separates:
 
-1. **current behavior** that exists at the frozen base;
-2. **target modern MCP `2026-07-28` semantics** already established by the epic/Phase 2 contract;
-3. **legacy compatibility paths** that remain supported only when explicitly represented in this matrix.
+1. **current behavior** frozen from the Phase 0 implementation base;
+2. **target MCP `2026-07-28` behavior** that later protocol work must implement;
+3. **legacy compatibility paths** that remain explicit support surfaces; and
+4. **operator-verified client deployments** that define the concrete client scenarios Issue #3 must preserve.
 
-The tests named below are the baseline falsification points for later refactors. A later change that intentionally alters a baseline claim must update both the implementation contract and this matrix rather than silently rewriting the test around the new behavior.
+The tests below are falsification points. Later phases may intentionally change a frozen behavior only when the governing issue authorizes the change and the matrix/test classification is updated with it.
 
-## Evidence boundary and deployment inventory
+## Evidence boundary and concrete client inventory
 
-### Concrete downstream clients
+Issue #3 requires the real client/upstream combinations that must remain supported to be identified. Repository source alone does not contain client application configuration, so Phase 0 combines repository authority with the operator-verified deployment inventory recorded on Issue #3 on 2026-08-29.
 
-`REAL_CLIENT_INVENTORY=UNVERIFIED`
+`REAL_CLIENT_INVENTORY=OPERATOR_VERIFIED`
 
-Issue #3, its comments, the current source, repository configuration, README, and current tests do **not** identify concrete downstream client products/applications by name. This repository therefore cannot truthfully claim that a named product such as a particular editor, agent harness, desktop application, or SDK is a required compatibility consumer.
+### Required concrete modern scenarios
 
-Phase 0 freezes **protocol client classes** instead:
+| Scenario ID | Concrete client | Mux namespace | Upstream identity / boundary | Evidence status | Regression |
+|---|---|---|---|---|---|
+| `opencode-modern-firecrawl` | OpenCode | `/firecrawl` | repository-configured managed Firecrawl endpoint (`http://localhost:3033/mcp`) | operator client config + repository config | `test_operator_verified_modern_client_scenarios[opencode-modern-firecrawl]` |
+| `opencode-modern-context7` | OpenCode | `/context7` | repository-configured Context7 endpoint (`https://mcp.context7.com/mcp`) | operator client config + repository config | `test_operator_verified_modern_client_scenarios[opencode-modern-context7]` |
+| `opencode-modern-huggingface` | OpenCode | `/huggingface` | repository-configured Hugging Face endpoint (`https://huggingface.co/mcp`) | operator client config + repository config | `test_operator_verified_modern_client_scenarios[opencode-modern-huggingface]` |
+| `opencode-modern-github` | OpenCode | `/github` | operator deployment GitHub MCP boundary; not present in the frozen branch config | operator client + deployment config | `test_operator_verified_modern_client_scenarios[opencode-modern-github]` |
+| `codex-modern-governed-gh-cli` | Codex | operator-specific governed `gh_cli` namespace | mux-managed governed `gh_mcp`/GitHub CLI service | operator deployment evidence | `test_operator_verified_modern_client_scenarios[codex-modern-governed-gh-cli]` |
 
-- modern stateless MCP `2026-07-28` over Streamable HTTP;
-- legacy sessionful Streamable HTTP using `initialize` and `Mcp-Session-Id`;
-- legacy HTTP+SSE using an SSE endpoint plus a message POST endpoint;
-- the mux-specific opt-in `legacy_sse_bridge` adapter for clients that require that local endpoint flow.
+These named regressions exercise the protocol invariant common to the concrete deployments: a client namespace selects one Streamable HTTP upstream boundary and valid modern traffic passes through without mux-local protocol-session state. Deployment-specific credentials and private route suffixes are deliberately not copied into repository fixtures.
 
-A deployment owner may later add concrete client identities without changing the protocol claims. Until then, the literal real-client deployment inventory remains an explicit evidence gap, not an inferred fact.
+OpenCode configuration also contains a `/postgres` route in operator files, but the exact backend mapping was not established by the Phase 0 evidence set. Issue #3 therefore explicitly records it as **configured but not a required compatibility commitment**. If it becomes a required deployment commitment, the governing compatibility authority must record its backend identity and add a named scenario before relying on it as preserved behavior.
 
-### Active upstreams declared by the repository
+### Repository-declared active upstream identities
 
-The current `mcp_router/config.yaml` establishes these active upstream identities:
+The frozen branch `mcp_router/config.yaml` independently establishes four active upstream identities:
 
-| Scenario ID | Namespace | Mode | Configured upstream | Current inferred transport | Phase 0 test identity |
+| Scenario ID | Namespace | Mode | Configured upstream | Inferred transport | Regression |
 |---|---|---|---|---|---|
 | `modern-remote-web-search` | `web-search` | `remote` | `https://mcp.garion.us/mcp` | `streamable-http` | `test_configured_upstreams_are_frozen_as_streamable_http[modern-remote-web-search]` |
 | `modern-managed-firecrawl` | `firecrawl` | `managed_cli` | `http://localhost:3033/mcp` | `streamable-http` | `test_configured_upstreams_are_frozen_as_streamable_http[modern-managed-firecrawl]` |
 | `modern-remote-huggingface` | `huggingface` | `remote` | `https://huggingface.co/mcp` | `streamable-http` | `test_configured_upstreams_are_frozen_as_streamable_http[modern-remote-huggingface]` |
 | `modern-remote-context7` | `context7` | `remote` | `https://mcp.context7.com/mcp` | `streamable-http` | `test_configured_upstreams_are_frozen_as_streamable_http[modern-remote-context7]` |
 
-The commented Crawl4AI block is an example of `transport: sse`; it is not active configuration and is therefore not treated as a currently deployed support commitment.
-
-The deterministic mock upstreams do not make network calls to any of these services. They freeze the mux contract independently of upstream availability, credentials, or service drift.
+`web-search` is a repository-known upstream but no concrete downstream client requirement was established. The commented Crawl4AI example is not active configuration and is not a support commitment.
 
 ## Legacy bridge consumer inventory
 
@@ -52,181 +55,177 @@ The deterministic mock upstreams do not make network calls to any of these servi
 
 Evidence:
 
-- `legacy_sse_bridge` defaults to `false` in `EndpointConfig`;
-- no active endpoint in `mcp_router/config.yaml` enables it;
-- current coverage exercises the adapter only through tests.
+- `legacy_sse_bridge` defaults to `false`;
+- no active frozen-branch endpoint enables it;
+- no operator-verified concrete client is recorded as requiring it;
+- current coverage exercises it only as a compatibility adapter.
 
-This status means **no real consumer is established by repository evidence**. It does not prove that no external deployment uses the bridge. Phase 5 is expected to add utilization telemetry before any eventual removal decision.
+This is a bounded statement about the available evidence, not proof that no unknown external deployment exists. Later telemetry work must precede removal.
 
-## Canonical target contract for modern MCP `2026-07-28`
+## Canonical target contract for MCP `2026-07-28`
 
-This section is the approved target contract for later implementation, not a claim that the current router already enforces every item.
+The target contract is normative for later implementation, but Phase 0 does not make the current production router enforce it yet.
 
 | Claim | Target contract |
 |---|---|
-| Public route | One canonical MCP endpoint per namespace: `POST /<namespace>`. |
-| Session model | Stateless at the MCP protocol layer; no local mux protocol session for modern requests. |
-| Handshake | No legacy `initialize`/`initialized` requirement for modern traffic. |
-| Session header | `Mcp-Session-Id` is legacy-only and not part of modern semantics. |
-| Protocol identity | `MCP-Protocol-Version: 2026-07-28` is required/validated by the future protocol edge. |
-| Routing headers | `Mcp-Method` must agree with the JSON-RPC method; `Mcp-Name` must agree for named operations such as `tools/call`, `resources/read`, and `prompts/get`. |
-| Message shape | Valid JSON-RPC only; no request-body repair and no Streamable HTTP batches. |
-| Transparency | Unknown extension methods, unknown fields, and `_meta` are preserved when valid. |
+| Public route | One canonical Streamable HTTP endpoint per namespace: `POST /<namespace>`. |
+| Session model | Stateless: every request is independently processable and does not depend on a prior mux protocol session. |
+| Per-request metadata | Every request carries `params._meta["io.modelcontextprotocol/protocolVersion"]` and `params._meta["io.modelcontextprotocol/clientCapabilities"]`; `clientInfo` is optional. |
+| Protocol header | `MCP-Protocol-Version` is required for modern POST and must match the body protocol version. |
+| Routing headers | `Mcp-Method` mirrors the JSON-RPC method. `Mcp-Name` mirrors `params.name` for `tools/call`/`prompts/get` and `params.uri` for `resources/read`. |
+| Result shape | Successful modern responses include `result.resultType`; `"complete"` represents a completed result. |
+| Message shape | Valid JSON-RPC object only; no Streamable HTTP batches or request-body repair. |
+| Transparency | Unknown valid fields, extension methods, and `_meta` data survive proxying. |
+| Legacy session header | `Mcp-Session-Id` is not modern protocol state. A modern request must not depend on it. |
 | Subpaths | Arbitrary `/<namespace>/<subpath>` forwarding is not part of the modern contract. |
-| GET/DELETE/SSE | Compatibility-only where an approved legacy mode requires them; not a mechanism for introducing modern local session state. |
-| Aggregation | No merged-tool MCP server; namespace still selects one upstream. |
+| Aggregation | A namespace still selects one upstream; there is no merged-tool MCP server. |
+
+Primary protocol references:
+
+- <https://modelcontextprotocol.io/specification/2026-07-28/basic>
+- <https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http>
+- <https://modelcontextprotocol.io/specification/2026-07-28/server/discover>
+- <https://modelcontextprotocol.io/specification/2026-07-28/server/tools>
 
 ## Claim-to-test matrix
 
 ### A. Modern stateless Streamable HTTP
 
-| Claim ID | Baseline claim | Current/target classification | Test evidence |
+| Claim ID | Baseline claim | Classification | Test evidence |
 |---|---|---|---|
-| `M-ST-01` | `POST /<namespace>` maps to the configured upstream MCP endpoint. | Current + target | `test_modern_stateless_streamable_http_baseline` |
-| `M-ST-02` | Valid modern protocol/routing headers pass through to the upstream. | Current pass-through; later strict validation | `test_modern_stateless_streamable_http_baseline` |
-| `M-ST-03` | Two modern requests can complete without local bridge sessions or `Mcp-Session-Id`. | Current + target | `test_modern_stateless_streamable_http_baseline` |
-| `M-ST-04` | Endpoint configuration overlays remain endpoint-specific and the configured active `/mcp` upstream inventory stays explicit. | Current architecture | `test_configured_upstreams_are_frozen_as_streamable_http[...]` |
-| `M-ST-05` | `Accept` is currently normalized upstream to `application/json, text/event-stream` for Streamable HTTP POST. | Current behavior; later transport implementation may change mechanics while preserving compatibility | `test_modern_stateless_streamable_http_baseline`; existing `test_streamable_http_direct_post_accepts_json_only_clients` |
-| `M-ST-06` | Modern target semantics reject local session dependence, malformed JSON-RPC, batches, and routing-header mismatches before forwarding. | Target only — Phase 2 | Future Phase 2 regressions; not falsely asserted as current behavior |
+| `M-ST-01` | `POST /<namespace>` maps to one configured upstream MCP endpoint. | Current + target | all `test_operator_verified_modern_client_scenarios[...]` cases |
+| `M-ST-02` | Valid `2026-07-28` per-request metadata and routing headers pass through. | Current pass-through; future strict validation | same |
+| `M-ST-03` | Modern requests complete without mux-local bridge sessions. | Current + target | same |
+| `M-ST-04` | Frozen branch upstream identity/mode/transport remains explicit. | Current architecture | `test_configured_upstreams_are_frozen_as_streamable_http[...]` |
+| `M-ST-05` | Current router normalizes POST `Accept` upstream to `application/json, text/event-stream`. | Current behavior | operator scenario test + existing router regression |
+| `M-ST-06` | The deterministic oracle rejects missing required per-request metadata. | Fixture authority | `test_modern_fixture_rejects_missing_required_per_request_metadata[...]` |
+| `M-ST-07` | Protocol-version header/body mismatch is a `400` `HeaderMismatch`. | Fixture authority / target | `test_modern_fixture_rejects_protocol_header_body_mismatch` |
+| `M-ST-08` | `resources/read` derives `Mcp-Name` from `params.uri`. | Fixture authority / target | `test_modern_fixture_uses_resource_uri_for_mcp_name` |
+| `M-ST-09` | A legacy session header is not used as modern protocol state. | Fixture authority / target | `test_modern_fixture_does_not_use_legacy_session_header_for_protocol_state` |
+| `M-ST-10` | Successful fixture responses include `resultType`; listed tools include `inputSchema`. | Fixture authority | operator scenario assertions |
+
+The fixture validates a correct modern peer. Production rejection of malformed/mismatched modern traffic remains Phase 2 work; Phase 0 does not falsely assert that the current router already performs that validation.
 
 ### B. Legacy sessionful Streamable HTTP
 
 | Claim ID | Baseline claim | Classification | Test evidence |
 |---|---|---|---|
-| `L-SH-01` | Legacy `initialize` can be forwarded to a Streamable HTTP upstream. | Current legacy compatibility | `test_legacy_sessionful_streamable_http_baseline` |
-| `L-SH-02` | An upstream `Mcp-Session-Id` response header is returned downstream. | Current legacy compatibility | `test_legacy_sessionful_streamable_http_baseline` |
-| `L-SH-03` | A later downstream `Mcp-Session-Id` is forwarded upstream transparently without creating a local bridge session. | Current legacy compatibility | `test_legacy_sessionful_streamable_http_baseline` |
-| `L-SH-04` | Legacy session traffic remains endpoint-scoped. | Current invariant | Existing `test_streamable_http_rejects_session_for_different_endpoint` covers mux-owned bridge sessions; transparent legacy session traffic remains naturally scoped by namespace routing |
+| `L-SH-01` | Legacy `initialize` can be forwarded. | Current compatibility | `test_legacy_sessionful_streamable_http_baseline` |
+| `L-SH-02` | Upstream `Mcp-Session-Id` is returned downstream. | Current compatibility | same |
+| `L-SH-03` | Later downstream session header is forwarded transparently without a mux-local bridge session. | Current compatibility | same |
+| `L-SH-04` | Mux-owned bridge sessions remain endpoint-scoped. | Preservation invariant | existing `test_streamable_http_rejects_session_for_different_endpoint` |
 
 ### C. Legacy HTTP+SSE
 
 | Claim ID | Baseline claim | Classification | Test evidence |
 |---|---|---|---|
-| `L-SSE-01` | An explicit `transport="sse"` endpoint proxies downstream SSE GET to the configured upstream SSE path. | Current legacy compatibility | `test_legacy_http_sse_baseline` |
-| `L-SSE-02` | Upstream `event: endpoint` message paths are rewritten beneath the mux namespace. | Current legacy compatibility | `test_legacy_http_sse_baseline` |
-| `L-SSE-03` | A downstream POST to that rewritten namespace subpath maps back to the upstream legacy message path and query. | Current legacy compatibility | `test_legacy_http_sse_baseline`; existing `test_sse_message_post_uses_upstream_message_path` |
-| `L-SSE-04` | Arbitrary subpath rewriting is legacy-only in the target architecture. | Target constraint | Phase 2 regression required when route restriction is implemented |
+| `L-SSE-01` | Explicit `transport="sse"` proxies downstream SSE GET to the legacy upstream path. | Current compatibility | `test_legacy_http_sse_baseline` |
+| `L-SSE-02` | Upstream endpoint events are rewritten beneath the mux namespace. | Current compatibility | same |
+| `L-SSE-03` | Downstream POST to the rewritten subpath maps to the upstream legacy message path/query. | Current compatibility | same + existing `test_sse_message_post_uses_upstream_message_path` |
+| `L-SSE-04` | Arbitrary subpath rewriting is legacy-only in the target architecture. | Target | Phase 2 regression when restriction is implemented |
 
 ### D. Mux-local `legacy_sse_bridge`
 
 | Claim ID | Baseline claim | Classification | Test evidence |
 |---|---|---|---|
-| `BR-01` | The local bridge is opt-in; normal Streamable HTTP SSE GET does not create local bridge state. | Current + target | Existing `test_streamable_http_sse_get_preserves_upstream_streamable_http` |
-| `BR-02` | Enabling `legacy_sse_bridge` creates a local SSE bridge session and local endpoint event. | Current legacy compatibility | Existing `test_streamable_http_sse_get_opens_local_sse_bridge_when_enabled`; `test_streamable_http_bridge` |
-| `BR-03` | The bridge captures upstream `Mcp-Session-Id` and reuses it for later bridge POSTs. | Current legacy compatibility | Existing `test_streamable_http_direct_response_json` |
-| `BR-04` | Cross-endpoint local bridge session reuse is rejected. | Preservation invariant | Existing `test_streamable_http_rejects_session_for_different_endpoint` |
-| `BR-05` | Removing/changing an endpoint drops its bridge sessions. | Current reload invariant | Existing `test_apply_configuration_drops_sessions_for_removed_or_changed_endpoint` |
-| `BR-06` | Bridge queues/tasks/streams become bounded, cancellable, and observable. | Target only — Phase 5 | Future Phase 5 regressions |
+| `BR-01` | Bridge is opt-in; normal Streamable HTTP SSE GET does not create local bridge state. | Current + target | existing `test_streamable_http_sse_get_preserves_upstream_streamable_http` |
+| `BR-02` | Enabling the bridge creates a local endpoint/session flow. | Current compatibility | existing bridge tests |
+| `BR-03` | Bridge captures/reuses upstream session identity for bridge POSTs. | Current compatibility | existing `test_streamable_http_direct_response_json` |
+| `BR-04` | Cross-endpoint bridge-session reuse is rejected. | Preservation invariant | existing cross-endpoint regression |
+| `BR-05` | Removing/changing an endpoint drops its bridge sessions. | Current reload invariant | existing configuration regression |
+| `BR-06` | Bridge resources become bounded/cancellable/observable. | Future target | Phase 5 |
 
 ### E. Current protocol repair and response projection
 
 | Claim ID | Baseline claim | Classification | Test evidence |
 |---|---|---|---|
-| `CUR-01` | Current router adds missing `jsonrpc: "2.0"` to request dictionaries with a `method`. | Current behavior scheduled to break | Existing `test_streamable_http_direct_post_adds_missing_jsonrpc_version` |
-| `CUR-02` | Current router also repairs qualifying items inside batches. | Current behavior scheduled to break | Existing `test_streamable_http_direct_post_adds_missing_jsonrpc_version_to_batch_items` |
-| `CUR-03` | Current tool policy projects `tools/list` using allow/deny lists. | Current behavior to be retained through a stronger policy layer | Existing `test_filter_tools_response_sse`, `test_filter_tools_response_json` |
-| `CUR-04` | Current tool projection does not prove direct-call authorization. | Known defect, not a supported security claim | Phase 3 must add negative direct-call tests |
-| `CUR-05` | Decoded JSON response transformation strips stale content encoding/length. | Current response-safety behavior | Existing `test_proxy_strips_encoding_headers_from_decoded_json_response` |
+| `CUR-01` | Current router inserts missing `jsonrpc: "2.0"` into request dictionaries with a method. | Current defect/compatibility behavior scheduled to break | existing regression |
+| `CUR-02` | Current router repairs qualifying batch items. | Current behavior scheduled to break | existing regression |
+| `CUR-03` | Current tool policy projects `tools/list` with allow/deny lists. | Current behavior | existing filter tests |
+| `CUR-04` | Tool-list projection does not prove direct-call authorization. | Known security defect | Phase 3 |
+| `CUR-05` | Rebuilt JSON responses strip stale encoding/length headers. | Current response-safety behavior | existing regression |
 
 ### F. Managed and remote endpoint behavior
 
 | Claim ID | Baseline claim | Classification | Test evidence |
 |---|---|---|---|
-| `RUN-01` | Remote endpoints proxy without local process startup. | Current architecture | Modern/legacy remote compatibility tests above |
-| `RUN-02` | `managed_cli` endpoints are a distinct endpoint mode and current `firecrawl` inventory remains explicitly managed. | Current architecture | `test_configured_upstreams_are_frozen_as_streamable_http[modern-managed-firecrawl]`; existing config tests |
-| `RUN-03` | Managed process startup currently uses the configured command and waits for TCP port readiness. | Current behavior scheduled for redesign | Existing `test_process_manager_lifecycle` |
-| `RUN-04` | Runtime reload/idle behavior will become transactional and lease-based. | Target only — Phase 4 | Future Phase 4 concurrency/integration regressions |
+| `RUN-01` | Remote endpoints proxy without local process startup. | Current architecture | compatibility tests |
+| `RUN-02` | `managed_cli` is distinct and frozen Firecrawl remains managed. | Current architecture | configured-upstream regression |
+| `RUN-03` | Managed startup uses configured command and TCP readiness. | Current behavior | existing process-manager regression |
+| `RUN-04` | Runtime reload/idle behavior becomes transactional/lease-based. | Future target | Phase 4 |
 
-## Named compatibility scenarios
+## Deterministic mock upstream authority
 
-The following names are the stable scenario vocabulary for this refactor:
+`tests/fixtures/mock_upstream.py` provides three in-process `httpx.MockTransport` modes:
 
-- `modern-stateless-streamable-http`
-- `legacy-sessionful-streamable-http`
-- `legacy-http-sse`
-- `legacy-local-sse-bridge-opt-in`
-- `modern-remote-web-search`
-- `modern-managed-firecrawl`
-- `modern-remote-huggingface`
-- `modern-remote-context7`
+| Mode | Contract |
+|---|---|
+| `modern-stateless` | Validates required `2026-07-28` per-request metadata, protocol/method/name header agreement, correct `resources/read` URI routing, and modern result/tool shapes; it does not use legacy session headers as modern state. |
+| `legacy-sessionful` | Returns a deterministic session ID from `initialize` and requires it on later legacy requests. |
+| `legacy-http-sse` | Emits a deterministic endpoint event and accepts the corresponding legacy message POST. |
 
-Concrete client-product names can be appended to these scenario classes when deployment evidence exists. They must not replace the protocol-class names, because the protocol claims are what the deterministic regression fixtures exercise.
+These fixtures make no live network calls and are compatibility oracles, not substitutes for the official MCP conformance suite planned for Phase 6.
 
-## Deterministic mock upstream fixtures
-
-`tests/fixtures/mock_upstream.py` provides an in-process `httpx.MockTransport` upstream with three modes:
-
-| Fixture mode | Purpose | Network/service dependency |
-|---|---|---|
-| `modern-stateless` | Requires MCP `2026-07-28` protocol/method/name headers where applicable and rejects any `Mcp-Session-Id`. | None |
-| `legacy-sessionful` | Returns a deterministic session ID from `initialize` and requires it on later requests. | None |
-| `legacy-http-sse` | Emits a deterministic SSE endpoint event and accepts the corresponding message POST path. | None |
-
-The fixtures intentionally avoid live Hugging Face, Context7, Firecrawl, or other network dependencies. They are compatibility fixtures, not conformance servers.
-
-## Preservation invariants for later phases
+## Preservation invariants
 
 ```text
 PRESERVATION_INVARIANTS:
 - One configured namespace selects exactly one upstream endpoint/runtime boundary.
-- Modern MCP v2 remains stateless through the mux.
-- Approved legacy sessionful Streamable HTTP can remain transparent until explicitly deprecated.
+- Valid modern MCP v2 traffic remains stateless through the mux.
+- Required real client deployments retain named compatibility scenarios.
+- Approved legacy sessionful Streamable HTTP remains transparent until explicitly deprecated.
 - Legacy HTTP+SSE subpath rewriting exists only on an explicit legacy transport path.
 - The mux-local legacy SSE bridge remains opt-in and endpoint/session isolated.
-- Upstream tools retain their names and schemas; the mux does not become a merged-tool server.
+- Upstream tools retain native names/schemas; the mux does not become a merged-tool server.
 - Remote and managed endpoint identities remain distinguishable.
-- Compatibility tests do not depend on live external services.
-- Known current defects are recorded as defects, not promoted into target guarantees.
+- Deterministic compatibility tests do not depend on external service availability.
+- Known current defects remain labeled as defects rather than target guarantees.
 ```
 
-## Intended breaking changes tracked for v0.2.0
+## Intended v0.2.0 breaking changes
 
-The baseline intentionally anticipates these later changes:
+Later phases intentionally:
 
-- malformed JSON-RPC and batches become local errors instead of being repaired;
-- modern routing headers/version become validated requirements;
-- arbitrary modern namespace subpaths are removed;
-- direct capability policy is enforced before forwarding;
-- gateway/caller credentials are isolated from upstream credentials;
-- insecure wildcard credentialed CORS and unvalidated Host/Origin behavior are removed;
-- managed-process execution/reload/readiness semantics become explicit and deterministic;
-- local legacy bridge resources become bounded and observable;
-- `stdio_bridge` is either implemented end to end or rejected by configuration.
+- reject malformed JSON-RPC and Streamable HTTP batches rather than repairing them;
+- enforce the modern per-request metadata and routing-header contract;
+- remove arbitrary modern namespace subpaths;
+- enforce direct capability policy before forwarding;
+- isolate caller and upstream credentials;
+- harden Host/Origin/caller authentication;
+- replace managed-process/reload heuristics with explicit runtime state;
+- bound and observe the local legacy adapter;
+- implement or reject `stdio_bridge`.
 
-A test that currently records one of these behaviors must be deliberately reclassified or replaced when its owning phase implements the approved break. It must not simply be deleted to obtain a green suite.
+Tests that encode a behavior being intentionally broken must be reclassified alongside the governing issue, never simply deleted to obtain green status.
 
 ## Out-of-scope product features
 
-- merged cross-upstream MCP tool aggregation;
-- tool renaming or schema adaptation;
-- arbitrary modern-to-legacy protocol translation;
-- adoption of unrelated MCP extensions solely because they exist;
-- cross-principal sharing of policy-filtered capability caches;
+- merged cross-upstream tool aggregation;
+- tool renaming/schema adaptation;
+- arbitrary modern-to-legacy translation;
+- unrelated MCP features solely because the revision supports them;
+- cross-principal sharing of policy-filtered caches;
 - converting `/summary` into an aggregated MCP server.
 
 ## Phase 0 acceptance mapping
 
-| Issue #3 acceptance criterion | Phase 0 evidence |
+| Issue #3 acceptance criterion | Evidence |
 |---|---|
-| Current architecture documented from code | ADR current-architecture sections cite exact source modules/symbol behavior and frozen base SHA. |
-| Canonical modern endpoint semantics approved | ADR Decision §2 and target contract above. |
-| All supported client/upstream combinations have named test scenarios | All repository-known active upstreams and all repository-supported protocol client classes have stable scenario names/tests. Concrete deployment client products remain explicitly `UNVERIFIED` because the repository contains no such inventory. |
+| Current architecture documented from code | ADR source-derived current-architecture sections. |
+| Canonical modern endpoint semantics approved | ADR Decision §2 plus the normative target table above. |
+| All supported client/upstream combinations have named scenarios | Operator-verified inventory recorded on Issue #3 and parameterized named regressions above. |
 | Legacy bridge consumers identified or provisionally unused | `LEGACY_SSE_BRIDGE_CONSUMERS=PROVISIONALLY_UNUSED`. |
-| Out-of-scope product features documented | ADR and this matrix both enumerate non-goals. |
-| Baseline tests detect compatibility regressions | New deterministic modern/sessionful/SSE integration baselines plus mapped existing regressions. |
-| ADR rejects monolithic merged-tool server | ADR Rejected alternative section. |
+| Out-of-scope product features documented | ADR + this matrix. |
+| Baseline detects accidental compatibility regressions | Correct modern oracle with negative oracle tests plus legacy integration baselines and existing regressions. |
+| ADR rejects monolithic merged-tool server | ADR rejected-alternative section. |
 
-## References
+## Repository references
 
-Repository authority:
-
-- Issues #1, #3, #5, #6, #7, and #8.
+- Issues #1, #3, #5, #6, #7, #8, and #9
 - `mcp_router/server.py`
 - `mcp_router/core/config_loader.py`
 - `mcp_router/core/process_manager.py`
 - `mcp_router/config.yaml`
 - `tests/test_router.py`
-
-External protocol authority:
-
-- MCP `2026-07-28` release: <https://blog.modelcontextprotocol.io/posts/2026-07-28/>
+- `tests/test_compatibility_baseline.py`
+- `tests/fixtures/mock_upstream.py`

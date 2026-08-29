@@ -8,39 +8,37 @@ The repository-sanctioned local assessment entry point is:
 
 It is a non-mutating host-evidence runner. It does not fetch refs, install dependencies, modify GitHub state, approve a pull request, merge, close an issue, or make a gate decision.
 
+Phase 0 introduces this runner and the minimal CI ratchet as an **intentional validation-control transition** authorized on Issue #3. This narrow bootstrap does not replace Phase 6 (#9), which still owns the final Python-version matrix, dependency auditing, conformance, required merge checks, and release-hardening validation.
+
 ## Authority inputs
 
 The runner binds assessment to:
 
-- an explicit exact 40-character `--base-sha`;
-- an explicit exact 40-character `--expected-head-sha`;
+- explicit exact 40-character `--base-sha`;
+- explicit exact 40-character `--expected-head-sha`;
 - the current Git branch and clean worktree;
 - `.python-version`;
-- the repository-local `.venv`;
+- repository-local `.venv`;
 - `.github/ci/toolchain.txt`;
 - `uv.lock`;
 - `.github/ci/changed-python.sh`.
 
-The local `.venv` must already contain the exact static/test tools declared by `.github/ci/toolchain.txt`. Environment construction remains outside the runner so an assessment never mutates the candidate merely to obtain green output.
+The local `.venv` must already contain the exact static/test tools declared by `.github/ci/toolchain.txt`. Environment construction remains outside the runner so assessment never mutates the candidate merely to obtain green output.
 
 ## Target kinds
 
 ### `implementation`
 
-Use before opening or updating a PR while the exact candidate commit is checked out on a named non-`main` working branch.
-
-Required authority:
+Use before PR handoff while the exact implementation commit is checked out on a named non-`main` branch:
 
 ```text
---base-sha=<exact authoritative main/base SHA>
---expected-head-sha=<exact current implementation HEAD>
+--base-sha=<exact authoritative base SHA>
+--expected-head-sha=<exact implementation HEAD>
 ```
 
 ### `pr`
 
-Use after a PR exists while its exact canonical head commit is checked out on the working branch.
-
-Required authority:
+Use after a PR exists while its exact canonical head is checked out on a named non-`main` branch:
 
 ```text
 --base-sha=<exact canonical PR base SHA>
@@ -48,32 +46,31 @@ Required authority:
 --pr-number=<PR number>
 ```
 
-The runner does not discover or trust PR identity from the local branch name. Central/GitHub authority supplies the exact PR identity and SHAs.
+The runner does not discover PR identity from the branch name. Central/GitHub authority supplies the PR identity and exact SHAs.
 
 ### `gate`
 
-Use only after the candidate has been merged and the exact merged `main` commit is checked out.
-
-Required authority:
+Use only after merge while exact merged `main` is checked out:
 
 ```text
---base-sha=<exact prior trusted/main control SHA>
---expected-head-sha=<exact merged main SHA under gate assessment>
+--base-sha=<exact prior trusted/main SHA>
+--expected-head-sha=<exact merged-main SHA>
 ```
 
-Gate mode refuses to run from a branch other than `main`.
+Gate mode refuses a branch other than `main`.
 
 ## Plan and run
 
 Use `plan` first:
 
 ```bash
-.github/ci/assessment.py plan implementation \
+.github/ci/assessment.py plan pr \
   --base-sha "$BASE_SHA" \
-  --expected-head-sha "$HEAD_SHA"
+  --expected-head-sha "$HEAD_SHA" \
+  --pr-number "$PR_NUMBER"
 ```
 
-`plan` performs admission/preflight, verifies repository and toolchain identity, and emits the exact changed-Python membership. It does not execute validation gates and reports:
+`plan` performs admission/preflight, verifies repository/toolchain identity, and emits the changed-Python membership. It does not execute validation checks and reports:
 
 ```text
 HOST_EVIDENCE_RESULT=NOT_RUN
@@ -83,38 +80,76 @@ GATE_DECISION=NOT_EVALUATED
 Then execute the same identity with `run`:
 
 ```bash
-.github/ci/assessment.py run implementation \
+.github/ci/assessment.py run pr \
   --base-sha "$BASE_SHA" \
   --expected-head-sha "$HEAD_SHA" \
-  --output /tmp/mcp-mux-implementation-evidence.json
+  --pr-number "$PR_NUMBER" \
+  --output /tmp/mcp-mux-pr-evidence.json
 ```
 
-Evidence output must be outside the repository so evidence generation cannot dirty the assessed worktree.
+Evidence output must be outside the repository.
 
 ## Validation plan
 
-For a valid admitted target, `run` executes:
+For an admitted target, `run` executes:
 
 1. `git diff --check <base> <head>`;
-2. Ruff on every ACMR Python file selected between exact base and head;
-3. Pyrefly on the same exact changed-Python membership;
+2. Ruff on every ACMR Python file selected between exact base/head;
+3. Pyrefly on that same membership;
 4. full-project Pytest.
 
-The static selector is the same `.github/ci/changed-python.sh` used by project CI. This is a ratchet over existing static debt: any Python file changed by a candidate must satisfy current Ruff/Pyrefly policy, while full-project Pytest remains cumulative.
+The selector is the same `.github/ci/changed-python.sh` used by project CI. This is a ratchet over pre-existing static debt: every changed Python file must satisfy current Ruff/Pyrefly policy while Pytest remains cumulative.
 
-## Typed results
+## Typed result contract
 
-The runner emits JSON to stdout and, when `--output` is supplied, writes the same JSON to that external path.
+For every syntactically valid runner invocation, the runner emits one canonical JSON evidence envelope to stdout. The envelope always includes:
+
+```text
+schema_version
+assessment_id
+action
+target
+pr_number
+repo_root
+branch
+base_sha
+expected_head_sha
+observed_head_sha
+python_executable
+python_policy
+python_version
+toolchain_manifest
+toolchain_manifest_sha256
+uv_lock_sha256
+runner_sha256
+changed_python
+checks
+host_evidence_result
+gate_decision
+warnings
+```
+
+Fields whose authority could not yet be established are `null` or retain the requested selector when appropriate. `assessment_id` is `null` when exact base/head identity could not be parsed.
+
+This same canonical envelope is used for early admission failures, including:
+
+- invalid/non-exact SHAs;
+- non-positive timeout;
+- execution outside a Git worktree;
+- unsafe repository-internal `--output`;
+- preflight branch/worktree/toolchain failures.
+
+Argument-parser syntax/usage errors (for example, omitting a required CLI argument so `argparse` exits before the runner is invoked) are CLI usage errors and are outside the typed evidence contract.
 
 `host_evidence_result` is one of:
 
 - `PASS` — admitted target and all executed checks passed;
 - `FAIL` — candidate validation failed or timed out;
-- `BLOCKED` — target identity/branch/worktree admission failed;
-- `STALE` — current HEAD does not match, or changes away from, the expected exact head;
-- `INFRA_ERROR` — required repository/toolchain infrastructure is missing or incompatible;
-- `ISOLATION_BREACH` — the worktree changes during assessment;
-- `NOT_RUN` — valid `plan` result before checks execute.
+- `BLOCKED` — identity/branch/worktree/admission precondition failed;
+- `STALE` — HEAD does not match or moves away from the expected exact head;
+- `INFRA_ERROR` — required repository/toolchain infrastructure is missing or the runner itself cannot execute correctly;
+- `ISOLATION_BREACH` — worktree content changes during assessment;
+- `NOT_RUN` — valid `plan` result before validation checks.
 
 The runner always emits:
 
@@ -122,18 +157,29 @@ The runner always emits:
 GATE_DECISION=NOT_EVALUATED
 ```
 
-A local `PASS` is host evidence only. Central review, exact-head GitHub CI, formal PR disposition, merge, issue closure, and gate closure remain separate authorities.
+A local `PASS` is host evidence only. Central review, exact-head GitHub CI, formal disposition, merge, issue closure, and gate closure remain separate authorities.
+
+## Regression coverage for the evidence contract
+
+`tests/test_assessment_runner.py` executes the runner as a subprocess and verifies canonical evidence for representative early failures:
+
+- malformed SHA → `BLOCKED`;
+- non-positive timeout → `BLOCKED`;
+- repository-internal output path → `BLOCKED` with no evidence file created;
+- execution outside a Git worktree → `INFRA_ERROR`.
+
+These tests protect the machine-readable failure schema as part of the Phase 0 validation-control contract.
 
 ## Non-negotiable failure behavior
 
-Do not respond to runner failures by:
+Do not respond to a runner failure by:
 
-- changing the base/head identity;
-- switching to a different `.venv`;
+- changing the requested base/head identity;
+- switching to a different ungoverned environment;
 - installing floating tool versions;
 - weakening Ruff/Pyrefly configuration;
 - adding suppressions merely to satisfy the runner;
-- skipping or marking failing tests expected;
-- running a manual substitute lifecycle to obtain a different result.
+- skipping or xfail-marking a real regression;
+- manually reconstructing the runner-owned lifecycle merely to obtain a different result.
 
 Return the emitted evidence and direct failure output to Central for diagnosis.
