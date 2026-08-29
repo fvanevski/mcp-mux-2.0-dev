@@ -73,6 +73,18 @@ def test_parse_rejects_malformed_batch_and_missing_jsonrpc():
     assert repaired.value.code == INVALID_REQUEST
 
 
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_parse_rejects_non_json_numeric_constants(constant: str):
+    body = (
+        '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"extension":'
+        f"{constant}"
+        "}}"
+    ).encode()
+    with pytest.raises(ProtocolRequestError) as invalid_constant:
+        parse_jsonrpc_request(body)
+    assert invalid_constant.value.code == PARSE_ERROR
+
+
 def test_protocol_validation_preserves_legacy_and_enforces_modern_headers():
     legacy = parse_jsonrpc_request(
         b'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}'
@@ -202,6 +214,19 @@ def test_transport_configuration_exposes_body_limit_and_endpoint_timeout():
             400,
             INVALID_REQUEST,
         ),
+        *[
+            (
+                (
+                    '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"extension":'
+                    + constant
+                    + "}}"
+                ).encode(),
+                {"content-type": "application/json"},
+                400,
+                PARSE_ERROR,
+            )
+            for constant in ("NaN", "Infinity", "-Infinity")
+        ],
         (
             json.dumps(modern_body()).encode(),
             {**modern_headers(), "Mcp-Method": "prompts/list"},
@@ -372,13 +397,22 @@ async def test_valid_modern_request_forwards_original_bytes_unknown_fields_and_t
     kwargs = fake_client.stream.call_args.kwargs
     assert kwargs["content"] == original
     assert kwargs["url"] == "https://upstream.test/mcp"
-    assert kwargs["timeout"] == 12.5
+    timeout = kwargs["timeout"]
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.connect == 12.5
+    assert timeout.read is None
+    assert timeout.write == 12.5
+    assert timeout.pool == 12.5
     assert kwargs["headers"]["MCP-Protocol-Version"] == MODERN_PROTOCOL_VERSION
     assert isolated.active_sessions == {}
 
 
 @pytest.mark.asyncio
-async def test_modern_subpath_is_rejected():
+@pytest.mark.parametrize(
+    ("subpath", "request_path"),
+    [("tools/list", "/modern/tools/list"), ("", "/modern/")],
+)
+async def test_modern_subpath_is_rejected(subpath: str, request_path: str):
     isolated = MCPRouter(Starlette(), "/tmp/not-used.yaml")
     isolated._configs = {
         "modern": EndpointConfig(
@@ -398,13 +432,19 @@ async def test_modern_subpath_is_rejected():
     }
     request = MagicMock(spec=Request)
     request.method = "POST"
-    request.path_params = {"path_prefix": "modern", "subpath": "tools/list"}
-    request.url.path = "/modern/tools/list"
+    request.path_params = {"path_prefix": "modern", "subpath": subpath}
+    request.url.path = request_path
     request.headers = modern_headers()
     request.query_params = {}
     request.body = AsyncMock(return_value=json.dumps(modern_body()).encode())
+    fake_client = MagicMock()
+    fake_client.is_closed = False
+    fake_client.stream = MagicMock()
+    isolated._http_client = cast(httpx.AsyncClient, fake_client)
+
     response = await isolated.catch_all_proxy(request)
     assert response.status_code == 404
+    fake_client.stream.assert_not_called()
 
 
 class EventStreamResponse:
@@ -421,6 +461,95 @@ class EventStreamResponse:
 
 
 @pytest.mark.asyncio
+async def test_legacy_sse_stream_has_no_read_idle_timeout():
+    isolated = MCPRouter(Starlette(), "/tmp/not-used.yaml")
+    isolated._configs = {
+        "legacy": EndpointConfig(
+            path="legacy",
+            mode="remote",
+            url="https://upstream.test/sse",
+            summary="Legacy",
+            transport="sse",
+            upstream_timeout=0.01,
+        )
+    }
+    request = MagicMock(spec=Request)
+    request.method = "GET"
+    request.path_params = {"path_prefix": "legacy"}
+    request.url.path = "/legacy"
+    request.headers = {"accept": "text/event-stream"}
+    request.query_params = {}
+
+    stream_context = MagicMock()
+    stream_context.__aenter__ = AsyncMock(return_value=EventStreamResponse())
+    stream_context.__aexit__ = AsyncMock(return_value=None)
+    fake_client = MagicMock()
+    fake_client.is_closed = False
+    fake_client.stream = MagicMock(return_value=stream_context)
+    isolated._http_client = cast(httpx.AsyncClient, fake_client)
+
+    response = await isolated.catch_all_proxy(request)
+    assert isinstance(response, StreamingResponse)
+    body_iterator = cast(AsyncGenerator[bytes], response.body_iterator)
+    first_event = await anext(body_iterator)
+    assert b": keepalive" in first_event
+
+    timeout = fake_client.stream.call_args.kwargs["timeout"]
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.connect == 0.01
+    assert timeout.read is None
+    assert timeout.write == 0.01
+    assert timeout.pool == 0.01
+
+    await body_iterator.aclose()
+    stream_context.__aexit__.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_finite_json_response_body_remains_bounded_by_upstream_timeout():
+    isolated = MCPRouter(Starlette(), "/tmp/not-used.yaml")
+    isolated._configs = {
+        "example": EndpointConfig(
+            path="example",
+            mode="remote",
+            url="https://upstream.test/mcp",
+            summary="Example",
+            transport="streamable-http",
+            upstream_timeout=0.01,
+        )
+    }
+    request = MagicMock(spec=Request)
+    request.method = "POST"
+    request.path_params = {"path_prefix": "example"}
+    request.url.path = "/example"
+    request.headers = modern_headers()
+    request.query_params = {}
+    request.body = AsyncMock(return_value=json.dumps(modern_body()).encode())
+
+    async def blocked_read() -> bytes:
+        await asyncio.Event().wait()
+        return b""
+
+    upstream_response = MagicMock()
+    upstream_response.status_code = 200
+    upstream_response.headers = httpx.Headers({"content-type": "application/json"})
+    upstream_response.aread = blocked_read
+    stream_context = MagicMock()
+    stream_context.__aenter__ = AsyncMock(return_value=upstream_response)
+    stream_context.__aexit__ = AsyncMock(return_value=None)
+    fake_client = MagicMock()
+    fake_client.is_closed = False
+    fake_client.stream = MagicMock(return_value=stream_context)
+    isolated._http_client = cast(httpx.AsyncClient, fake_client)
+
+    response = await isolated.catch_all_proxy(request)
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 504
+    assert json.loads(bytes(response.body)) == {"error": "Upstream response timed out"}
+    stream_context.__aexit__.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_downstream_cancellation_closes_upstream_response_context():
     isolated = MCPRouter(Starlette(), "/tmp/not-used.yaml")
     isolated._configs = {
@@ -430,6 +559,7 @@ async def test_downstream_cancellation_closes_upstream_response_context():
             url="https://upstream.test/mcp",
             summary="Example",
             transport="streamable-http",
+            upstream_timeout=0.01,
         )
     }
     request = MagicMock(spec=Request)
@@ -454,6 +584,13 @@ async def test_downstream_cancellation_closes_upstream_response_context():
     first_event = await anext(body_iterator)
     assert b": keepalive" in first_event
     assert b"id: 1" in first_event
+
+    timeout = fake_client.stream.call_args.kwargs["timeout"]
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.connect == 0.01
+    assert timeout.read is None
+    assert timeout.write == 0.01
+    assert timeout.pool == 0.01
 
     blocked_read = asyncio.create_task(anext(body_iterator))
     await asyncio.sleep(0)
