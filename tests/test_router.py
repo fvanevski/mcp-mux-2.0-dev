@@ -811,14 +811,15 @@ async def test_sse_message_post_uses_upstream_message_path():
 async def test_streamable_http_direct_response_json():
     import httpx
     from starlette.requests import Request
-    # Configure endpoint
+    # Configure endpoint with the legacy compatibility bridge explicitly enabled.
     router._configs = {
         "huggingface": EndpointConfig(
             path="huggingface",
             mode="remote",
             url="https://huggingface.co/mcp",
             summary="HuggingFace remote server",
-            transport="streamable-http"
+            transport="streamable-http",
+            legacy_sse_bridge=True,
         )
     }
     router.active_sessions.clear()
@@ -930,14 +931,16 @@ async def test_streamable_http_rejects_session_for_different_endpoint():
             mode="remote",
             url="http://api.weather.com/mcp",
             summary="Weather summary",
-            transport="streamable-http"
+            transport="streamable-http",
+            legacy_sse_bridge=True,
         ),
         "huggingface": EndpointConfig(
             path="huggingface",
             mode="remote",
             url="https://huggingface.co/mcp",
             summary="HuggingFace remote server",
-            transport="streamable-http"
+            transport="streamable-http",
+            legacy_sse_bridge=True,
         )
     }
     router.active_sessions.clear()
