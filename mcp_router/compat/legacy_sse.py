@@ -458,10 +458,10 @@ class LegacySSEBridge:
             raise
 
     async def _stream_session(self, session: BridgeSession) -> AsyncIterator[bytes]:
-        endpoint_uri = f"/{session.path_prefix}?session_id={session.session_id}"
-        yield f"event: endpoint\ndata: {endpoint_uri}\n\n".encode()
         disconnected = False
         try:
+            endpoint_uri = f"/{session.path_prefix}?session_id={session.session_id}"
+            yield f"event: endpoint\ndata: {endpoint_uri}\n\n".encode()
             while True:
                 queue_task = asyncio.create_task(session.queue.get())
                 closed_task = asyncio.create_task(session.closed.wait())
