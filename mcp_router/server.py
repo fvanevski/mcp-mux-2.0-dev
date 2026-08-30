@@ -4,19 +4,10 @@ import asyncio
 import logging
 import os
 import time
-from collections.abc import (
-    AsyncGenerator,
-    AsyncIterator,
-    Awaitable,
-    Callable,
-    Iterator,
-    Mapping,
-    MutableMapping,
-)
+from collections.abc import AsyncIterator, Iterator, Mapping, MutableMapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse, urlunparse
-from uuid import uuid4
 
 import httpx
 from starlette.applications import Starlette
@@ -60,6 +51,9 @@ from mcp_router.core.security import (
 )
 from mcp_router.core.sse import iter_sse_events, render_sse_event, transform_sse_event
 
+if TYPE_CHECKING:
+    from mcp_router.compat.legacy_sse import LegacySSEBridge
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -84,13 +78,6 @@ _HTTP_LIMITS = httpx.Limits(
 def _upstream_stream_timeout(timeout: float) -> httpx.Timeout:
     """Bound request setup/write/pool operations without imposing an SSE read-idle timeout."""
     return httpx.Timeout(timeout, read=None)
-
-
-@dataclass
-class BridgeSession:
-    path_prefix: str
-    queue: asyncio.Queue[str]
-    remote_session_id: str | None = None
 
 
 def get_target_url(config_url: str, request_path: str, path_prefix: str) -> str:
@@ -249,7 +236,7 @@ class MCPRouter:
         self._config_view = _EndpointConfigView(self)
         self._reload_lock = asyncio.Lock()
         self.max_request_body_bytes = _DEFAULT_MAX_REQUEST_BODY_BYTES
-        self.active_sessions: dict[str, BridgeSession] = {}
+        self._legacy_bridge: LegacySSEBridge | None = None
         self._accepting_work = True
         self._running = False
         self._checker_task: asyncio.Task[None] | None = None
@@ -303,6 +290,22 @@ class MCPRouter:
     async def _get_http_client(self) -> httpx.AsyncClient:
         return await self.open_http_client()
 
+    def _get_legacy_bridge(self) -> LegacySSEBridge:
+        bridge = self._legacy_bridge
+        if bridge is None:
+            # The compatibility module is deliberately imported only when an
+            # explicitly configured legacy client actually needs it. Canonical
+            # modern Streamable HTTP therefore has no bridge import/state path.
+            from mcp_router.compat.legacy_sse import LegacySSEBridge
+
+            bridge = LegacySSEBridge(
+                client_provider=self._get_http_client,
+                response_redactor=lambda text: self._redactor.redact_known_secrets(text),
+                log_redactor=lambda text: self._redactor.redact(text),
+            )
+            self._legacy_bridge = bridge
+        return bridge
+
     async def apply_configuration(self, config: RouterConfig) -> None:
         """Drain runtime-affecting changes before atomically publishing a validated snapshot."""
         new_endpoints = {endpoint.path: endpoint for endpoint in config.endpoints}
@@ -323,7 +326,8 @@ class MCPRouter:
                     runtime,
                     final_state=RuntimeState.DRAINING,
                 )
-                self._drop_sessions_for_path(path)
+                if self._legacy_bridge is not None:
+                    await self._legacy_bridge.close_endpoint(path)
 
             next_runtimes: dict[str, EndpointRuntime] = {}
             retained_runtimes: list[EndpointRuntime] = []
@@ -352,18 +356,6 @@ class MCPRouter:
                 self.process_manager.reconcile_restart_policy(runtime)
 
         logger.info("Applied config. Active paths: %s", list(self._runtimes))
-
-    def _drop_sessions_for_path(self, path_prefix: str) -> None:
-        runtime = self._runtimes.get(path_prefix)
-        session_ids = [
-            session_id
-            for session_id, session in self.active_sessions.items()
-            if session.path_prefix == path_prefix
-        ]
-        for session_id in session_ids:
-            self.active_sessions.pop(session_id, None)
-            if runtime is not None:
-                runtime.legacy_session_ids.discard(session_id)
 
     async def idle_timeout_checker(self) -> None:
         while self._running:
