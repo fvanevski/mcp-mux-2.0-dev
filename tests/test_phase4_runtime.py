@@ -29,13 +29,17 @@ def _find_unused_loopback_port() -> int:
 
 def managed_config(
     *,
+    path: str = "managed",
     url: str = "http://localhost:3033/mcp",
+    headers: dict[str, str] | None = None,
     legacy_fallback: bool = False,
     restart: dict[str, object] | None = None,
     legacy_sse_bridge: bool = False,
+    readiness_timeout: float = 0.05,
+    readiness_interval: float = 0.01,
 ) -> ManagedEndpointConfig:
     data: dict[str, object] = {
-        "path": "managed",
+        "path": path,
         "mode": "managed_cli",
         "argv": ["example-mcp", "--serve"],
         "url": url,
@@ -43,11 +47,13 @@ def managed_config(
         "timeout": 30,
         "legacy_sse_bridge": legacy_sse_bridge,
         "readiness": {
-            "timeout": 0.05,
-            "interval": 0.01,
+            "timeout": readiness_timeout,
+            "interval": readiness_interval,
             "legacy_initialize_fallback": legacy_fallback,
         },
     }
+    if headers is not None:
+        data["headers"] = headers
     if restart is not None:
         data["restart"] = restart
     endpoint = RouterConfig.model_validate({"endpoints": [data]}).endpoints[0]
@@ -160,11 +166,15 @@ async def test_reload_drains_active_runtime_before_atomic_publication() -> None:
     lease = await old_runtime.acquire_lease()
     drain_started = asyncio.Event()
 
-    async def drain(runtime: EndpointRuntime) -> None:
+    async def drain(
+        runtime: EndpointRuntime,
+        *,
+        final_state: RuntimeState = RuntimeState.STOPPED,
+    ) -> None:
         runtime.state = RuntimeState.DRAINING
         drain_started.set()
         await runtime.wait_for_leases()
-        runtime.state = RuntimeState.STOPPED
+        runtime.state = final_state
 
     with patch.object(
         router.process_manager,
@@ -185,7 +195,86 @@ async def test_reload_drains_active_runtime_before_atomic_publication() -> None:
     replacement = router._runtimes["managed"]
     assert replacement is not old_runtime
     assert replacement.config.url == "http://localhost:4040/mcp"
-    drain_and_stop.assert_awaited_once_with(old_runtime)
+    drain_and_stop.assert_awaited_once_with(
+        old_runtime,
+        final_state=RuntimeState.DRAINING,
+    )
+
+
+@pytest.mark.asyncio
+async def test_multi_endpoint_reload_keeps_retired_runtime_unavailable_until_publication() -> None:
+    router = MCPRouter(Starlette(), "unused")
+    old_alpha = managed_config(path="alpha", url="http://localhost:3033/mcp")
+    old_beta = managed_config(path="beta", url="http://localhost:3034/mcp")
+    router._configs = {"alpha": old_alpha, "beta": old_beta}
+    alpha_runtime = router._runtimes["alpha"]
+    beta_runtime = router._runtimes["beta"]
+    alpha_runtime.state = RuntimeState.RUNNING
+    beta_runtime.state = RuntimeState.RUNNING
+    beta_lease = await beta_runtime.acquire_lease()
+    alpha_drained = asyncio.Event()
+
+    replacement = RouterConfig.model_validate(
+        {
+            "endpoints": [
+                {
+                    "path": "alpha",
+                    "mode": "managed_cli",
+                    "argv": ["example-mcp", "--serve"],
+                    "url": "http://localhost:4040/mcp",
+                    "summary": "Alpha replacement",
+                },
+                {
+                    "path": "beta",
+                    "mode": "managed_cli",
+                    "argv": ["example-mcp", "--serve"],
+                    "url": "http://localhost:4041/mcp",
+                    "summary": "Beta replacement",
+                },
+            ]
+        }
+    )
+
+    async def drain(
+        runtime: EndpointRuntime,
+        *,
+        final_state: RuntimeState = RuntimeState.STOPPED,
+    ) -> None:
+        runtime.state = RuntimeState.DRAINING
+        await runtime.wait_for_leases()
+        runtime.state = final_state
+        if runtime.path == "alpha":
+            alpha_drained.set()
+
+    with patch.object(
+        router.process_manager,
+        "drain_and_stop",
+        new_callable=AsyncMock,
+        side_effect=drain,
+    ):
+        reload_task = asyncio.create_task(router.apply_configuration(replacement))
+        await alpha_drained.wait()
+
+        assert router._runtimes["alpha"] is alpha_runtime
+        assert alpha_runtime.state is RuntimeState.DRAINING
+        with patch.object(
+            router.process_manager,
+            "start_managed_server",
+            new_callable=AsyncMock,
+        ) as start_managed:
+            lease, rejection = await router._acquire_upstream_lease(alpha_runtime)
+
+        assert lease is None
+        assert rejection is not None
+        assert rejection.status_code == 503
+        start_managed.assert_not_awaited()
+        assert not reload_task.done()
+
+        await beta_lease.release()
+        await reload_task
+
+    assert router._runtimes["alpha"] is not alpha_runtime
+    assert router._runtimes["alpha"].config.url == "http://localhost:4040/mcp"
 
 
 @pytest.mark.asyncio
@@ -274,6 +363,126 @@ async def test_mcp_discovery_or_approved_legacy_fallback_establishes_readiness()
 
 
 @pytest.mark.asyncio
+async def test_readiness_probe_uses_remaining_budget_not_poll_interval() -> None:
+    manager = ProcessManager()
+    endpoint = managed_config(readiness_timeout=0.3, readiness_interval=0.1)
+    runtime = EndpointRuntime.from_config(endpoint)
+    runtime.process = MagicMock(returncode=None)
+    observed_timeouts: list[float] = []
+
+    async def discovery(
+        candidate: ManagedEndpointConfig,
+        timeout: float,
+    ) -> bool:
+        assert candidate is endpoint
+        observed_timeouts.append(timeout)
+        return timeout > 0.2
+
+    with (
+        patch.object(manager, "_wait_for_port", new_callable=AsyncMock, return_value=True),
+        patch.object(
+            manager,
+            "_probe_modern_discovery",
+            new_callable=AsyncMock,
+            side_effect=discovery,
+        ),
+    ):
+        assert await manager._wait_for_readiness(runtime, endpoint) is True
+
+    assert len(observed_timeouts) == 1
+    assert observed_timeouts[0] > endpoint.readiness.interval
+
+
+@pytest.mark.asyncio
+async def test_readiness_stream_accepts_first_sse_result_without_waiting_for_eof() -> None:
+    manager = ProcessManager()
+    endpoint = managed_config(readiness_timeout=1.0)
+    stream_closed = asyncio.Event()
+    never = asyncio.Event()
+
+    async def readiness_lines():
+        yield "event: message"
+        yield (
+            'data: {"jsonrpc":"2.0","id":"mcp-mux-readiness",'
+            '"result":{"supportedVersions":["2026-07-28"]}}'
+        )
+        yield ""
+        await never.wait()
+
+    response = MagicMock()
+    response.status_code = 200
+    response.headers = httpx.Headers({"content-type": "text/event-stream"})
+    response.aiter_lines = readiness_lines
+
+    stream_context = MagicMock()
+    stream_context.__aenter__ = AsyncMock(return_value=response)
+
+    async def close_stream(*args: object) -> None:
+        del args
+        stream_closed.set()
+
+    stream_context.__aexit__ = AsyncMock(side_effect=close_stream)
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    client.stream = MagicMock(return_value=stream_context)
+
+    with patch(
+        "mcp_router.core.process_manager.httpx.AsyncClient",
+        return_value=client,
+    ):
+        assert await manager._probe_modern_discovery(endpoint, 1.0) is True
+
+    assert stream_closed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_readiness_probe_preserves_configured_headers_and_overrides_protocol_fields() -> None:
+    manager = ProcessManager()
+    endpoint = managed_config(
+        headers={
+            "Authorization": "Bearer readiness-secret",
+            "Accept": "text/plain",
+            "Mcp-Method": "wrong-method",
+        },
+        readiness_timeout=1.0,
+    )
+    response = MagicMock()
+    response.status_code = 200
+    response.headers = httpx.Headers({"content-type": "application/json"})
+    response.aread = AsyncMock(return_value=b"{}")
+    response.json = MagicMock(
+        return_value={
+            "jsonrpc": "2.0",
+            "id": "mcp-mux-readiness",
+            "result": {"supportedVersions": ["2026-07-28"]},
+        }
+    )
+    stream_context = MagicMock()
+    stream_context.__aenter__ = AsyncMock(return_value=response)
+    stream_context.__aexit__ = AsyncMock(return_value=None)
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    client.stream = MagicMock(return_value=stream_context)
+
+    with patch(
+        "mcp_router.core.process_manager.httpx.AsyncClient",
+        return_value=client,
+    ):
+        assert await manager._probe_modern_discovery(endpoint, 1.0) is True
+
+    sent_headers = {
+        name.casefold(): value
+        for name, value in client.stream.call_args.kwargs["headers"].items()
+    }
+    assert sent_headers["authorization"] == "Bearer readiness-secret"
+    assert sent_headers["accept"] == "application/json, text/event-stream"
+    assert sent_headers["mcp-method"] == "server/discover"
+    assert sent_headers["mcp-protocol-version"] == "2026-07-28"
+
+
+@pytest.mark.asyncio
 async def test_unexpected_exit_marks_runtime_failed_and_records_status() -> None:
     manager = ProcessManager()
     endpoint = managed_config()
@@ -291,6 +500,96 @@ async def test_unexpected_exit_marks_runtime_failed_and_records_status() -> None
     assert runtime.last_exit_code == 17
     assert runtime.failure_reason == "managed process exited unexpectedly with code 17"
     assert runtime.restart_task is None
+
+
+@pytest.mark.asyncio
+async def test_failed_runtime_rejects_demand_activation_without_resetting_restart_budget() -> None:
+    manager = ProcessManager()
+    router = MCPRouter(Starlette(), "unused")
+    endpoint = managed_config(
+        restart={
+            "enabled": True,
+            "max_attempts": 3,
+            "initial_backoff": 0.25,
+            "max_backoff": 0.5,
+        }
+    )
+    runtime = EndpointRuntime.from_config(endpoint)
+    runtime.state = RuntimeState.FAILED
+    runtime.restart_attempts = 1
+    restart_blocker = asyncio.Event()
+
+    async def pending_restart() -> None:
+        await restart_blocker.wait()
+
+    restart_task = asyncio.create_task(pending_restart())
+    runtime.restart_task = restart_task
+    try:
+        with patch.object(
+            router.process_manager,
+            "start_managed_server",
+            new_callable=AsyncMock,
+        ) as start_managed:
+            for _ in range(3):
+                lease, rejection = await router._acquire_upstream_lease(runtime)
+                assert lease is None
+                assert rejection is not None
+                assert rejection.status_code == 503
+
+        start_managed.assert_not_awaited()
+        assert runtime.restart_attempts == 1
+        assert runtime.restart_task is restart_task
+        assert not restart_task.done()
+        with pytest.raises(RuntimeError, match="is failed"):
+            await manager.start_managed_server(runtime)
+        assert runtime.restart_task is restart_task
+        assert not restart_task.done()
+    finally:
+        restart_task.cancel()
+        await asyncio.gather(restart_task, return_exceptions=True)
+        runtime.restart_task = None
+
+
+@pytest.mark.asyncio
+async def test_idle_timeout_skips_active_stream_lease_then_stops_after_release() -> None:
+    router = MCPRouter(Starlette(), "unused")
+    endpoint = managed_config()
+    router._configs = {endpoint.path: endpoint}
+    runtime = router._runtimes[endpoint.path]
+    runtime.state = RuntimeState.RUNNING
+    runtime.process = MagicMock(returncode=None)
+    runtime.last_completed_activity = time.monotonic() - endpoint.timeout - 1.0
+    lease = await runtime.acquire_lease()
+
+    async def run_one_iteration(delay: float) -> None:
+        del delay
+        router._running = False
+
+    router._running = True
+    with (
+        patch("mcp_router.server.asyncio.sleep", side_effect=run_one_iteration),
+        patch.object(
+            router.process_manager,
+            "stop_managed_server",
+            new_callable=AsyncMock,
+        ) as stop_managed,
+    ):
+        await router.idle_timeout_checker()
+    stop_managed.assert_not_awaited()
+
+    await lease.release()
+    runtime.last_completed_activity = time.monotonic() - endpoint.timeout - 1.0
+    router._running = True
+    with (
+        patch("mcp_router.server.asyncio.sleep", side_effect=run_one_iteration),
+        patch.object(
+            router.process_manager,
+            "stop_managed_server",
+            new_callable=AsyncMock,
+        ) as stop_managed,
+    ):
+        await router.idle_timeout_checker()
+    stop_managed.assert_awaited_once_with(runtime)
 
 
 @pytest.mark.asyncio
