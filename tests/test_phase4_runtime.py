@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import signal
+from collections.abc import AsyncGenerator
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -117,7 +119,7 @@ async def test_runtime_lease_spans_stream_lifetime() -> None:
 
     response: Response = await router._finish_leased_response(StreamingResponse(body()), lease)
     assert isinstance(response, StreamingResponse)
-    iterator = response.body_iterator.__aiter__()
+    iterator = cast(AsyncGenerator[bytes, None], response.body_iterator)
 
     assert await anext(iterator) == b"first"
     assert runtime.active_leases == 1
@@ -202,9 +204,8 @@ async def test_local_legacy_sse_connection_does_not_start_or_lease_managed_runti
     assert runtime.state is RuntimeState.STOPPED
     assert runtime.active_leases == 0
     start_managed.assert_not_awaited()
-    body_iterator = response.body_iterator.__aiter__()
-    close_iterator = getattr(body_iterator, "aclose")
-    await close_iterator()
+    body_iterator = cast(AsyncGenerator[bytes, None], response.body_iterator)
+    await body_iterator.aclose()
 
 
 @pytest.mark.asyncio
