@@ -214,6 +214,23 @@ async def test_valid_trace_context_is_forwarded_and_invalid_context_is_dropped()
         assert "tracestate" not in forwarded
         assert rejected_context.status_code == 200
 
+        stream = _json_stream(b'{"jsonrpc":"2.0","id":3,"result":{"tools":[]}}')
+        with patch("httpx.AsyncClient.stream", return_value=stream) as call:
+            uppercase_context = await client.post(
+                "/weather",
+                json=_modern_request(3, "tools/list"),
+                headers={
+                    "MCP-Protocol-Version": MODERN_PROTOCOL_VERSION,
+                    "Mcp-Method": "tools/list",
+                    "traceparent": "00-4BF92F3577B34DA6A3CE929D0E0E4736-00F067AA0BA902B7-01",
+                    "tracestate": "must=not-forward",
+                },
+            )
+        forwarded = {key.casefold(): value for key, value in call.call_args.kwargs["headers"].items()}
+        assert "traceparent" not in forwarded
+        assert "tracestate" not in forwarded
+        assert uppercase_context.status_code == 200
+
 
 @pytest.mark.asyncio
 async def test_denied_calls_and_upstream_failures_are_exposed_as_metrics():

@@ -24,7 +24,7 @@
 | Forged modern routing headers | Modern `2026-07-28` body metadata and `MCP-Protocol-Version` / `Mcp-Method` / `Mcp-Name` agreement are validated before dispatch. |
 | Host/Origin exposure | Local-only mode requires loopback callers; non-loopback binding requires authenticated mode; allowed Host/Origin values are enforced. |
 | Secret leakage in logs | Structured request logs contain operational metadata only, never raw request/response bodies or headers. Existing process/upstream error logging passes through the configured redactor. |
-| Trace metadata abuse | Only syntactically valid W3C version-00 `traceparent` is forwarded with bounded `tracestate`; invalid trace context and arbitrary caller `baggage` are dropped. Trace values are not logged. |
+| Trace metadata abuse | Only W3C version-00 `traceparent` values using the normative lowercase-hex grammar and nonzero trace/parent IDs are forwarded with bounded `tracestate`; invalid trace context and arbitrary caller `baggage` are dropped. Trace values are not logged. |
 | Unbounded stream/session work | Runtime leases, bridge queue/session limits, TTL/backpressure policy, cancellation cleanup, and endpoint retirement bound work. |
 | Managed child escape/leak | Structured `argv` is preferred, shell execution is explicitly marked unsafe, child process groups are terminated on cleanup, and restart attempts are bounded. |
 | Reload races | Runtime-affecting configuration changes drain old runtimes before atomic publication of the new snapshot. |

@@ -60,7 +60,7 @@ Configuration models reject unknown fields. Environment references are expanded 
 
 ### Caller headers versus upstream headers
 
-Inbound caller headers are deny-by-default. MCP transport headers needed for protocol operation (`Content-Type`, `Accept`, MCP routing/session headers, `Mcp-Param-*`, and the supported `traceparent`/`tracestate` trace context) are forwarded automatically. Arbitrary W3C `baggage` is not forwarded by default. An endpoint may opt additional non-security headers in with `inbound_headers`:
+Inbound caller headers are deny-by-default. MCP transport headers needed for protocol operation (`Content-Type`, `Accept`, MCP routing/session headers, `Mcp-Param-*`, and the supported `traceparent`/`tracestate` trace context) are forwarded automatically. Version-00 `traceparent` must use the W3C lowercase-hex wire grammar with nonzero trace/parent IDs; otherwise both trace headers are dropped. Arbitrary W3C `baggage` is not forwarded by default. An endpoint may opt additional non-security headers in with `inbound_headers`:
 
 ```yaml
 inbound_headers: [X-Tenant-Hint]
