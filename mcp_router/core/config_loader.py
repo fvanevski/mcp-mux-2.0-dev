@@ -78,8 +78,11 @@ def expand_env_vars(value: Any) -> Any:
 
 
 def load_router_config(config_path: str) -> RouterConfig:
-    with open(config_path, encoding="utf-8") as config_file:
-        data = yaml.safe_load(config_file) or {}
+    try:
+        with open(config_path, encoding="utf-8") as config_file:
+            data = yaml.safe_load(config_file) or {}
+    except yaml.YAMLError:
+        raise ValueError("Router configuration contains invalid YAML") from None
     return RouterConfig.model_validate(expand_env_vars(data))
 
 
@@ -132,7 +135,7 @@ def _validate_header_name(value: str, field_name: str) -> str:
 
 
 class SecurityConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     mode: Literal["local_only", "authenticated"] = "local_only"
     allowed_hosts: list[str] = Field(
@@ -229,14 +232,14 @@ class SecurityConfig(BaseModel):
 
 
 class RequestLimitConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     max_concurrent: int | None = Field(default=None, ge=1)
     requests_per_minute: int | None = Field(default=None, ge=1)
 
 
 class EndpointBase(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     path: str
     url: str
@@ -388,7 +391,7 @@ class RemoteEndpointConfig(EndpointBase):
 
 
 class ManagedReadinessConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     host: str | None = None
     port: int | None = Field(default=None, ge=1, le=65535)
@@ -402,6 +405,8 @@ class ManagedReadinessConfig(BaseModel):
 
 
 class ManagedEndpointConfig(EndpointBase):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
     mode: Literal["managed_cli"]
     argv: list[str] | None = None
     env: dict[str, str] = Field(default_factory=dict)
@@ -472,7 +477,7 @@ def EndpointConfig(**data: Any) -> Endpoint:
 
 
 class RouterConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     endpoints: list[Endpoint]
     max_request_body_bytes: int = Field(default=1_048_576, ge=1024, le=67_108_864)

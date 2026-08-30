@@ -36,7 +36,7 @@ from mcp_router.core.protocol import (
     ProtocolEra,
     ProtocolRequestError,
     build_jsonrpc_error,
-    extract_request_name,
+    extract_policy_request_names,
     parse_jsonrpc_request,
     validate_protocol_request,
 )
@@ -415,6 +415,25 @@ class MCPRouter:
             headers["accept"] = "application/json, text/event-stream"
         return headers
 
+    def _safe_response_headers(
+        self,
+        headers: Mapping[str, str],
+        *,
+        body_was_decoded: bool = False,
+        body_was_transformed: bool = False,
+    ) -> dict[str, str]:
+        sanitized = build_response_headers(
+            headers,
+            _HOP_BY_HOP_REQUEST_HEADERS,
+            body_was_decoded=body_was_decoded,
+            body_was_transformed=body_was_transformed,
+        )
+        return {
+            key: value
+            for key, value in sanitized.items()
+            if self._redactor.redact_known_secrets(value) == value
+        }
+
     @staticmethod
     def _principal(request: Request) -> str:
         scope = getattr(request, "scope", {})
@@ -473,7 +492,7 @@ class MCPRouter:
 
                 def transform(data: str) -> str:
                     rewritten = _rewrite_legacy_endpoint_data(data, path_prefix)
-                    redacted = self._redactor.redact(rewritten)
+                    redacted = self._redactor.redact_known_secrets(rewritten)
                     current_endpoint = self._configs.get(path_prefix)
                     if current_endpoint is None:
                         return redacted
@@ -589,7 +608,7 @@ class MCPRouter:
                         response.aread(),
                         timeout=endpoint.upstream_timeout,
                     )
-                    body_str = self._redactor.redact(
+                    body_str = self._redactor.redact_known_secrets(
                         body_bytes.decode("utf-8", errors="replace")
                     )
                     projected_body, _ = policy.project_json_text(
@@ -603,7 +622,7 @@ class MCPRouter:
                 elif "text/event-stream" in content_type or "event-stream" in content_type:
                     async for event in iter_sse_events(response.aiter_lines()):
                         def transform(data: str) -> str:
-                            redacted = self._redactor.redact(data)
+                            redacted = self._redactor.redact_known_secrets(data)
                             projected, _ = policy.project_json_text(
                                 redacted,
                                 principal=principal,
@@ -625,7 +644,7 @@ class MCPRouter:
                             )
                         except StopAsyncIteration:
                             break
-                        await session.queue.put(self._redactor.redact(line))
+                        await session.queue.put(self._redactor.redact_known_secrets(line))
             except asyncio.CancelledError:
                 raise
             except (httpx.HTTPError, OSError, RuntimeError, UnicodeError, ValueError) as exc:
@@ -689,16 +708,15 @@ class MCPRouter:
             finally:
                 await stream_context.__aexit__(None, None, None)
             decoded_body = body_bytes.decode("utf-8", errors="replace")
-            redacted_body = self._redactor.redact(decoded_body)
+            redacted_body = self._redactor.redact_known_secrets(decoded_body)
             projected_body, policy_changed = policy.project_json_text(
                 redacted_body,
                 principal=principal,
                 endpoint=path_prefix,
             )
             body_transformed = policy_changed or redacted_body != decoded_body
-            response_headers = build_response_headers(
+            response_headers = self._safe_response_headers(
                 response.headers,
-                _HOP_BY_HOP_REQUEST_HEADERS,
                 body_was_decoded=True,
                 body_was_transformed=body_transformed,
             )
@@ -712,9 +730,8 @@ class MCPRouter:
             )
 
         if "event-stream" in content_type.casefold():
-            response_headers = build_response_headers(
+            response_headers = self._safe_response_headers(
                 response.headers,
-                _HOP_BY_HOP_REQUEST_HEADERS,
                 body_was_transformed=True,
             )
             response_headers.update(
@@ -729,7 +746,7 @@ class MCPRouter:
                 try:
                     async for event in iter_sse_events(response.aiter_lines()):
                         def transform(data: str) -> str:
-                            redacted = self._redactor.redact(data)
+                            redacted = self._redactor.redact_known_secrets(data)
                             current_endpoint = self._configs.get(path_prefix, endpoint)
                             current_policy = CapabilityPolicy.from_endpoint(current_endpoint)
                             projected, _ = current_policy.project_json_text(
@@ -751,9 +768,8 @@ class MCPRouter:
             )
 
         textual_response = content_type.casefold().startswith("text/")
-        response_headers = build_response_headers(
+        response_headers = self._safe_response_headers(
             response.headers,
-            _HOP_BY_HOP_REQUEST_HEADERS,
             body_was_transformed=textual_response and self._redactor.active,
         )
         if textual_response and self._redactor.active:
@@ -850,24 +866,29 @@ class MCPRouter:
         policy = CapabilityPolicy.from_endpoint(endpoint)
         request_name: str | None = None
         if parsed_request is not None:
-            request_name = extract_request_name(parsed_request)
-            decision = policy.authorize(
-                principal=principal,
-                endpoint=path_prefix,
-                method=parsed_request.method,
-                name=request_name,
-            )
-            if not decision.allowed:
-                if parsed_request.request_id is None:
-                    return Response(status_code=403)
-                return JSONResponse(
-                    build_jsonrpc_error(
-                        CAPABILITY_DENIED,
-                        "Capability denied by endpoint policy",
-                        request_id=parsed_request.request_id,
-                    ),
-                    status_code=403,
+            try:
+                policy_names = extract_policy_request_names(parsed_request)
+            except ProtocolRequestError as exc:
+                return _jsonrpc_error_response(exc)
+            request_name = policy_names[0] if len(policy_names) == 1 else None
+            for policy_name in policy_names or (None,):
+                decision = policy.authorize(
+                    principal=principal,
+                    endpoint=path_prefix,
+                    method=parsed_request.method,
+                    name=policy_name,
                 )
+                if not decision.allowed:
+                    if parsed_request.request_id is None:
+                        return Response(status_code=403)
+                    return JSONResponse(
+                        build_jsonrpc_error(
+                            CAPABILITY_DENIED,
+                            "Capability denied by endpoint policy",
+                            request_id=parsed_request.request_id,
+                        ),
+                        status_code=403,
+                    )
 
         tool_limit_name = (
             request_name
@@ -987,17 +1008,22 @@ class MCPRouter:
                 on_complete=None if limit_lease is None else limit_lease.release,
             )
 
-        response = await self._proxy_request(
-            request=request,
-            endpoint=endpoint,
-            path_prefix=path_prefix,
-            target_url=target_url,
-            forward_headers=forward_headers,
-            request_body=request_body,
-            policy=policy,
-            principal=principal,
-        )
-        return await self._finish_limited_response(response, limit_lease)
+        try:
+            response = await self._proxy_request(
+                request=request,
+                endpoint=endpoint,
+                path_prefix=path_prefix,
+                target_url=target_url,
+                forward_headers=forward_headers,
+                request_body=request_body,
+                policy=policy,
+                principal=principal,
+            )
+            return await self._finish_limited_response(response, limit_lease)
+        except BaseException:
+            if limit_lease is not None:
+                await limit_lease.release()
+            raise
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))

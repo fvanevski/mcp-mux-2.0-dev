@@ -46,15 +46,20 @@ class SecretRedactor:
                         values.append(value)
         return cls(values)
 
-    def redact(self, text: str) -> str:
+    def redact_known_secrets(self, text: str) -> str:
+        """Replace only configured secret literals, preserving protocol framing."""
         output = text
         for value in self._values:
             output = output.replace(value, _REDACTED)
-        output = _SECRET_ASSIGNMENT.sub(
+        return output
+
+    def redact(self, text: str) -> str:
+        """Redact configured secrets plus secret-like assignments in unstructured logs."""
+        output = self.redact_known_secrets(text)
+        return _SECRET_ASSIGNMENT.sub(
             lambda match: f"{match.group(1)}{match.group(2)}{_REDACTED}",
             output,
         )
-        return output
 
     def stream(self) -> StreamingSecretRedactor:
         return StreamingSecretRedactor(self)
@@ -72,7 +77,7 @@ class StreamingSecretRedactor:
         if not text:
             return ""
         if self._max_literal_length <= 1:
-            return self._redactor.redact(text)
+            return self._redactor.redact_known_secrets(text)
 
         combined = self._carry + text
         keep = self._max_literal_length - 1
@@ -94,11 +99,11 @@ class StreamingSecretRedactor:
                 break
             cutoff = adjusted
 
-        output = self._redactor.redact(combined[:cutoff])
+        output = self._redactor.redact_known_secrets(combined[:cutoff])
         self._carry = combined[cutoff:]
         return output
 
     def finish(self) -> str:
-        output = self._redactor.redact(self._carry)
+        output = self._redactor.redact_known_secrets(self._carry)
         self._carry = ""
         return output

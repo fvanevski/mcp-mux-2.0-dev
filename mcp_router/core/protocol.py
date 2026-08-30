@@ -25,6 +25,11 @@ _NAMED_METHOD_FIELDS = {
     "prompts/get": "name",
     "resources/read": "uri",
 }
+_POLICY_NAMED_METHOD_FIELDS = {
+    **_NAMED_METHOD_FIELDS,
+    "resources/subscribe": "uri",
+    "resources/unsubscribe": "uri",
+}
 _BASE64_PREFIX = "=?base64?"
 _BASE64_SUFFIX = "?="
 
@@ -222,6 +227,41 @@ def extract_request_name(request: ParsedJSONRPCRequest) -> str | None:
         return None
     value = request.params.get(name_field)
     return value if isinstance(value, str) and value else None
+
+
+def extract_policy_request_names(
+    request: ParsedJSONRPCRequest,
+) -> tuple[str | None, ...]:
+    """Return every capability name/URI that endpoint policy must authorize."""
+    if request.method == "subscriptions/listen":
+        notifications = request.params.get("notifications")
+        if not isinstance(notifications, dict):
+            return ()
+        raw_uris = notifications.get("resourceSubscriptions")
+        if raw_uris is None:
+            return ()
+        if not isinstance(raw_uris, list):
+            raise ProtocolRequestError(
+                INVALID_PARAMS,
+                "subscriptions/listen resourceSubscriptions must be an array of URIs",
+                request_id=request.request_id,
+            )
+        uris: list[str] = []
+        for raw_uri in raw_uris:
+            if not isinstance(raw_uri, str) or not raw_uri:
+                raise ProtocolRequestError(
+                    INVALID_PARAMS,
+                    "subscriptions/listen resourceSubscriptions must contain non-empty URI strings",
+                    request_id=request.request_id,
+                )
+            uris.append(raw_uri)
+        return tuple(uris)
+
+    name_field = _POLICY_NAMED_METHOD_FIELDS.get(request.method)
+    if name_field is None:
+        return (None,)
+    value = request.params.get(name_field)
+    return (value if isinstance(value, str) and value else None,)
 
 
 def _request_id(value: Any) -> str | int:
