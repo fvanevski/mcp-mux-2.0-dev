@@ -25,7 +25,6 @@ def _endpoint(
     *,
     path: str = "legacy",
     bridge: dict[str, object] | None = None,
-    limits: dict[str, object] | None = None,
 ) -> Endpoint:
     data: dict[str, object] = {
         "path": path,
@@ -36,8 +35,6 @@ def _endpoint(
     }
     if bridge is not None:
         data["legacy_sse_bridge"] = bridge
-    if limits is not None:
-        data["limits"] = limits
     return RouterConfig.model_validate({"endpoints": [data]}).endpoints[0]
 
 
@@ -467,11 +464,13 @@ async def test_response_task_cancelled_before_first_step_releases_leases_and_all
     endpoint = _endpoint(
         path="legacy",
         bridge={"max_sessions": 2},
-        limits={"max_concurrent": 1},
     )
     router._configs = {"legacy": endpoint}
     bridge, session, iterator = await _open_bridge(router, "legacy")
     old_runtime = session.runtime
+    # The long-lived SSE GET must not consume the POST capacity being tested.
+    # Enable the endpoint concurrency limit only after the session is open.
+    endpoint.limits.max_concurrent = 1
 
     response_body_started = asyncio.Event()
 
