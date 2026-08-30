@@ -187,7 +187,7 @@ class ProcessManager:
             # Retirement must become non-activatable before the first await,
             # even when no managed process is currently running.
             runtime.state = RuntimeState.DRAINING
-        # Bridge response tasks own upstream-work leases. Cancel them before
+        # Bridge setup/response work can pin upstream-work leases. Cancel it before
         # waiting for the lease count to reach zero so retirement cannot deadlock
         # behind compatibility work that retirement itself must terminate.
         await runtime.cancel_legacy_tasks()
