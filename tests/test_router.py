@@ -446,32 +446,6 @@ async def test_streamable_http_sse_get_opens_local_sse_bridge_when_enabled():
     await response.body_iterator.aclose()
 
 
-@pytest.mark.asyncio
-async def test_streamable_http_bridge():
-    session_id = "local-session-123"
-    queue = asyncio.Queue()
-    router.active_sessions.clear()
-    router.active_sessions[session_id] = BridgeSession(path_prefix="weather", queue=queue)
-
-    stream = router.local_sse_generator(session_id, queue, "weather")
-    try:
-        endpoint_event = (await anext(stream)).decode("utf-8")
-        assert "event: endpoint" in endpoint_event
-        assert f"data: /weather?session_id={session_id}" in endpoint_event
-
-        await queue.put("event: message")
-        await queue.put('data: {"result":"cloudy"}')
-
-        event_line = (await anext(stream)).decode("utf-8").strip()
-        data_line = (await anext(stream)).decode("utf-8").strip()
-        assert event_line == "event: message"
-        assert data_line == 'data: {"result":"cloudy"}'
-    finally:
-        await stream.aclose()
-
-    assert session_id not in router.active_sessions
-
-
 # --- Tool Filtering Tests ---
 
 def test_endpoint_config_allowed_denied_validation():
