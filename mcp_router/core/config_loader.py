@@ -248,6 +248,17 @@ class RequestLimitConfig(BaseModel):
     requests_per_minute: int | None = Field(default=None, ge=1)
 
 
+class LegacySSEBridgeConfig(BaseModel):
+    """Explicit bounded policy for the deprecated local SSE compatibility adapter."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    queue_capacity: int = Field(default=32, ge=1, le=4096)
+    backpressure_timeout: float = Field(default=1.0, gt=0, le=60.0)
+    session_ttl: float = Field(default=300.0, gt=0, le=86400.0)
+    max_sessions: int = Field(default=32, ge=1, le=4096)
+
+
 class EndpointBase(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
@@ -257,7 +268,7 @@ class EndpointBase(BaseModel):
     timeout: float = Field(default=300.0, gt=0)
     upstream_timeout: float = Field(default=60.0, gt=0)
     transport: Literal["sse", "streamable-http"] | None = None
-    legacy_sse_bridge: bool = False
+    legacy_sse_bridge: LegacySSEBridgeConfig | None = None
     allowed_methods: list[str] | None = None
     denied_methods: list[str] | None = None
     allowed_tools: list[str] | None = None
@@ -391,7 +402,7 @@ class EndpointBase(BaseModel):
                 else "sse"
             )
 
-        if self.legacy_sse_bridge and self.transport != "streamable-http":
+        if self.legacy_sse_bridge is not None and self.transport != "streamable-http":
             raise ValueError("legacy_sse_bridge requires transport 'streamable-http'")
         return self
 
