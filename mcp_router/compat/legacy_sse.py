@@ -358,8 +358,17 @@ class LegacySSEBridge:
                 payload["detail"] = detail
             return await finish(JSONResponse(payload, status_code=502))
 
+        response_started = asyncio.Event()
+        response_entered = False
+
         async def process_response() -> None:
+            nonlocal response_entered
             try:
+                # Lease ownership is not transferred merely by creating this task.
+                # Signal only after execution has entered the cancellation-safe
+                # try/finally that owns upstream cleanup and on_complete().
+                response_entered = True
+                response_started.set()
                 content_type = response.headers.get("content-type", "").casefold()
                 if "application/json" in content_type:
                     body_bytes = await asyncio.wait_for(
@@ -436,6 +445,7 @@ class LegacySSEBridge:
                     if on_complete is not None:
                         await on_complete()
 
+        response_task: asyncio.Task[None] | None = None
         async with session.cleanup_lock:
             rejection = post_setup_rejection()
             if rejection is None:
@@ -443,16 +453,61 @@ class LegacySSEBridge:
                 remote_session_id = response.headers.get("mcp-session-id")
                 if remote_session_id:
                     session.remote_session_id = remote_session_id
+
+                def response_done(task: asyncio.Task[None]) -> None:
+                    session.response_tasks.discard(task)
+                    # A task cancelled before its first execution never reaches
+                    # process_response()'s try/finally. Wake the request-side
+                    # handoff so it can retain cleanup/lease ownership.
+                    response_started.set()
+
                 response_task = asyncio.create_task(
                     process_response(),
                     name=f"mcp-mux:{path_prefix}:legacy-response",
                 )
                 session.response_tasks.add(response_task)
-                response_task.add_done_callback(session.response_tasks.discard)
+                response_task.add_done_callback(response_done)
                 runtime.track_legacy_task(response_task)
         if rejection is not None:
             await tracked.close()
             return await finish(rejection)
+
+        assert response_task is not None
+        try:
+            await response_started.wait()
+        except BaseException:
+            # The request still owns the leases until the response coroutine has
+            # entered its protected lifetime. Request cancellation during this
+            # handshake must therefore tear down any published response work.
+            if not response_task.done():
+                response_task.cancel()
+            await asyncio.gather(response_task, return_exceptions=True)
+            try:
+                await tracked.close()
+            finally:
+                session.upstreams.discard(tracked)
+            raise
+
+        if not response_entered:
+            # Cancellation won after publication but before the response coroutine
+            # could enter its try/finally. No ownership transfer occurred: close the
+            # entered upstream and release request-owned leases here.
+            try:
+                await tracked.close()
+            finally:
+                session.upstreams.discard(tracked)
+            async with session.cleanup_lock:
+                rejection = post_setup_rejection()
+            if rejection is not None:
+                return await finish(rejection)
+            self._metric(path_prefix).upstream_failures_total += 1
+            return await finish(
+                JSONResponse(
+                    {"error": "Legacy bridge response task ended before startup"},
+                    status_code=502,
+                )
+            )
+
         return Response("Accepted", status_code=202)
 
     async def close_endpoint(self, path_prefix: str) -> None:

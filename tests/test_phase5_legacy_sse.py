@@ -25,6 +25,7 @@ def _endpoint(
     *,
     path: str = "legacy",
     bridge: dict[str, object] | None = None,
+    limits: dict[str, object] | None = None,
 ) -> Endpoint:
     data: dict[str, object] = {
         "path": path,
@@ -35,6 +36,8 @@ def _endpoint(
     }
     if bridge is not None:
         data["legacy_sse_bridge"] = bridge
+    if limits is not None:
+        data["limits"] = limits
     return RouterConfig.model_validate({"endpoints": [data]}).endpoints[0]
 
 
@@ -447,6 +450,106 @@ async def test_runtime_retirement_during_bridge_setup_cannot_deadlock() -> None:
     await asyncio.wait_for(reload_task, timeout=0.2)
 
     assert post_response.status_code == 503
+    assert old_runtime.active_leases == 0
+    assert old_runtime.legacy_tasks == set()
+    assert session.setup_tasks == set()
+    assert session.response_tasks == set()
+    assert session.session_id not in bridge.sessions
+    assert session.upstreams == set()
+    assert router._runtimes["legacy"] is not old_runtime
+    stream_context.__aexit__.assert_awaited_once_with(None, None, None)
+    await iterator.aclose()
+
+
+@pytest.mark.asyncio
+async def test_response_task_cancelled_before_first_step_releases_leases_and_allows_retirement() -> None:
+    router = MCPRouter(Starlette(), "unused")
+    endpoint = _endpoint(
+        path="legacy",
+        bridge={"max_sessions": 2},
+        limits={"max_concurrent": 1},
+    )
+    router._configs = {"legacy": endpoint}
+    bridge, session, iterator = await _open_bridge(router, "legacy")
+    old_runtime = session.runtime
+
+    response_body_started = asyncio.Event()
+
+    async def upstream_lines():
+        response_body_started.set()
+        yield "event: message"
+        yield 'data: {"jsonrpc":"2.0","id":1,"result":{"tools":[]}}'
+        yield ""
+
+    upstream_response = MagicMock()
+    upstream_response.status_code = 200
+    upstream_response.headers = httpx.Headers({"content-type": "text/event-stream"})
+    upstream_response.aiter_lines = upstream_lines
+
+    stream_context = MagicMock()
+    stream_context.__aenter__ = AsyncMock(return_value=upstream_response)
+    stream_context.__aexit__ = AsyncMock(return_value=None)
+    client = MagicMock()
+    client.stream = MagicMock(return_value=stream_context)
+    bridge._client_provider = AsyncMock(return_value=client)
+
+    original_track_legacy_task = old_runtime.track_legacy_task
+
+    def cancel_response_before_start(task: asyncio.Task[object]) -> None:
+        original_track_legacy_task(task)
+        if task.get_name().endswith(":legacy-response"):
+            # track_legacy_task() is called synchronously immediately after
+            # create_task(), before handle_post() yields. Cancelling here therefore
+            # deterministically hits the published-but-never-started task window.
+            task.cancel()
+
+    with patch.object(
+        old_runtime,
+        "track_legacy_task",
+        side_effect=cancel_response_before_start,
+    ):
+        post_response = await asyncio.wait_for(
+            router.catch_all_proxy(
+                _request(
+                    "POST",
+                    "legacy",
+                    headers={"content-type": "application/json"},
+                    query_string=f"session_id={session.session_id}".encode(),
+                    body=_legacy_body(),
+                )
+            ),
+            timeout=0.2,
+        )
+
+    assert post_response.status_code == 502
+    assert not response_body_started.is_set()
+    assert old_runtime.active_leases == 0
+    assert session.response_tasks == set()
+    assert session.upstreams == set()
+    stream_context.__aexit__.assert_awaited_once_with(None, None, None)
+
+    recovered_lease, recovered_rejection = await router._limiter.acquire(endpoint)
+    assert recovered_rejection is None
+    assert recovered_lease is not None
+    await recovered_lease.release()
+
+    replacement = RouterConfig.model_validate(
+        {
+            "endpoints": [
+                {
+                    "path": "legacy",
+                    "mode": "remote",
+                    "url": "https://replacement.example.test/mcp",
+                    "summary": "Replacement fixture",
+                    "transport": "streamable-http",
+                    "legacy_sse_bridge": {},
+                    "limits": {"max_concurrent": 1},
+                }
+            ]
+        }
+    )
+    await asyncio.wait_for(router.apply_configuration(replacement), timeout=0.2)
+
     assert old_runtime.active_leases == 0
     assert old_runtime.legacy_tasks == set()
     assert session.setup_tasks == set()
