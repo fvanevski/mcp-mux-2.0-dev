@@ -395,6 +395,31 @@ class MCPRouter:
             except (OSError, RuntimeError, ValueError) as exc:
                 logger.error("Error in idle timeout checker: %s", exc)
 
+    def _legacy_bridge_summary(self, runtime: EndpointRuntime) -> dict[str, object]:
+        config = runtime.config.legacy_sse_bridge
+        metrics = (
+            self._legacy_bridge.metrics_snapshot(runtime.path)
+            if self._legacy_bridge is not None
+            else {
+                "active_sessions": 0,
+                "sessions_opened_total": 0,
+                "posts_total": 0,
+                "downstream_disconnects_total": 0,
+                "expired_sessions_total": 0,
+                "session_limit_rejections_total": 0,
+                "upstream_failures_total": 0,
+                "backpressure_failures_total": 0,
+            }
+        )
+        return {
+            "enabled": config is not None,
+            "queue_capacity": None if config is None else config.queue_capacity,
+            "backpressure_timeout": None if config is None else config.backpressure_timeout,
+            "session_ttl": None if config is None else config.session_ttl,
+            "max_sessions": None if config is None else config.max_sessions,
+            **metrics,
+        }
+
     async def get_summary(self, request: Request) -> JSONResponse:
         del request
         summary_list = [
@@ -406,6 +431,7 @@ class MCPRouter:
                 "active_upstream_leases": runtime.active_leases,
                 "last_exit_code": runtime.last_exit_code,
                 "restart_attempts": runtime.restart_attempts,
+                "legacy_sse_bridge": self._legacy_bridge_summary(runtime),
             }
             for runtime in self._runtimes.values()
         ]
@@ -618,161 +644,6 @@ class MCPRouter:
         finally:
             if response is not None:
                 await stream_context.__aexit__(None, None, None)
-
-    async def local_sse_generator(
-        self,
-        session_id: str,
-        queue: asyncio.Queue[str],
-        path_prefix: str,
-    ) -> AsyncGenerator[bytes]:
-        runtime = self._runtimes.get(path_prefix)
-        client_post_uri = f"/{path_prefix}?session_id={session_id}"
-        yield f"event: endpoint\ndata: {client_post_uri}\n\n".encode()
-        try:
-            while True:
-                line = await queue.get()
-                yield (line + "\n").encode("utf-8")
-        finally:
-            self.active_sessions.pop(session_id, None)
-            if runtime is not None:
-                runtime.legacy_session_ids.discard(session_id)
-
-    async def _bridge_post(
-        self,
-        *,
-        request: Request,
-        endpoint: Endpoint,
-        runtime: EndpointRuntime,
-        path_prefix: str,
-        target_url: str,
-        forward_headers: dict[str, str],
-        request_body: bytes,
-        session_id: str,
-        policy: CapabilityPolicy,
-        principal: str,
-        on_complete: Callable[[], Awaitable[None]] | None = None,
-    ) -> Response:
-        async def finish(response: Response) -> Response:
-            if on_complete is not None:
-                await on_complete()
-            return response
-
-        session = self.active_sessions.get(session_id)
-        if session is None:
-            return await finish(JSONResponse({"error": "Session not found"}, status_code=404))
-        if session.path_prefix != path_prefix:
-            return await finish(
-                JSONResponse({"error": "Session belongs to a different endpoint"}, status_code=409)
-            )
-
-        params = {
-            key: value
-            for key, value in request.query_params.items()
-            if key != "session_id"
-        }
-        if session.remote_session_id:
-            forward_headers["Mcp-Session-Id"] = session.remote_session_id
-        else:
-            forward_headers.pop("Mcp-Session-Id", None)
-            forward_headers.pop("mcp-session-id", None)
-        forward_headers["accept"] = "application/json, text/event-stream"
-
-        try:
-            client = await self._get_http_client()
-            stream_context = client.stream(
-                method="POST",
-                url=target_url,
-                headers=forward_headers,
-                params=params,
-                content=request_body,
-                timeout=_upstream_stream_timeout(endpoint.upstream_timeout),
-            )
-            response = await asyncio.wait_for(
-                stream_context.__aenter__(),
-                timeout=endpoint.upstream_timeout,
-            )
-        except (httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
-            logger.error(
-                "Failed to proxy bridge POST to streamable-http backend: %s",
-                self._redactor.redact(str(exc)),
-            )
-            return await finish(
-                JSONResponse({"error": "Failed to proxy request"}, status_code=502)
-            )
-
-        try:
-            remote_session_id = response.headers.get("mcp-session-id")
-            if remote_session_id:
-                session.remote_session_id = remote_session_id
-        except BaseException:
-            await stream_context.__aexit__(None, None, None)
-            raise
-
-        async def process_response() -> None:
-            try:
-                content_type = response.headers.get("content-type", "").casefold()
-                if "application/json" in content_type:
-                    body_bytes = await asyncio.wait_for(
-                        response.aread(),
-                        timeout=endpoint.upstream_timeout,
-                    )
-                    body_str = self._redactor.redact_known_secrets(
-                        body_bytes.decode("utf-8", errors="replace")
-                    )
-                    projected_body, _ = policy.project_json_text(
-                        body_str,
-                        principal=principal,
-                        endpoint=path_prefix,
-                    )
-                    await session.queue.put("event: message")
-                    await session.queue.put(f"data: {projected_body}")
-                    await session.queue.put("")
-                elif "text/event-stream" in content_type or "event-stream" in content_type:
-                    async for event in iter_sse_events(response.aiter_lines()):
-                        def transform(data: str) -> str:
-                            redacted = self._redactor.redact_known_secrets(data)
-                            projected, _ = policy.project_json_text(
-                                redacted,
-                                principal=principal,
-                                endpoint=path_prefix,
-                            )
-                            return projected
-
-                        transformed = transform_sse_event(event, transform)
-                        for line in transformed:
-                            await session.queue.put(line)
-                        await session.queue.put("")
-                else:
-                    line_iterator = response.aiter_lines().__aiter__()
-                    while True:
-                        try:
-                            line = await asyncio.wait_for(
-                                anext(line_iterator),
-                                timeout=endpoint.upstream_timeout,
-                            )
-                        except StopAsyncIteration:
-                            break
-                        await session.queue.put(self._redactor.redact_known_secrets(line))
-            except asyncio.CancelledError:
-                raise
-            except (httpx.HTTPError, OSError, RuntimeError, UnicodeError, ValueError) as exc:
-                logger.error(
-                    "Error reading response from streamable-http backend: %s",
-                    self._redactor.redact(str(exc)),
-                )
-            finally:
-                try:
-                    await stream_context.__aexit__(None, None, None)
-                finally:
-                    if on_complete is not None:
-                        await on_complete()
-
-        response_task = asyncio.create_task(
-            process_response(),
-            name=f"mcp-mux:{path_prefix}:legacy-response",
-        )
-        runtime.track_legacy_task(response_task)
-        return Response("Accepted", status_code=202)
 
     async def _proxy_request(
         self,
