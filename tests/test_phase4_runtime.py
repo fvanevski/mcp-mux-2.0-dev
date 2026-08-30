@@ -547,6 +547,161 @@ async def test_cancelled_bridge_setup_releases_runtime_and_limit_leases() -> Non
 
 
 @pytest.mark.asyncio
+async def test_cancelled_demand_start_cleans_process_and_releases_limit_capacity() -> None:
+    router = MCPRouter(Starlette(), "unused")
+    endpoint = RouterConfig.model_validate(
+        {
+            "endpoints": [
+                {
+                    "path": "managed",
+                    "mode": "managed_cli",
+                    "argv": ["example-mcp", "--serve"],
+                    "url": "http://localhost:3033/mcp",
+                    "summary": "Managed startup cancellation fixture",
+                    "limits": {"max_concurrent": 1},
+                }
+            ]
+        }
+    ).endpoints[0]
+    assert isinstance(endpoint, ManagedEndpointConfig)
+    router._configs = {"managed": endpoint}
+    runtime = router._runtimes["managed"]
+    assert runtime.state is RuntimeState.STOPPED
+
+    def process_fixture(pid: int) -> tuple[MagicMock, asyncio.Event]:
+        process_exit = asyncio.Event()
+        process = MagicMock()
+        process.pid = pid
+        process.returncode = None
+
+        async def wait_for_exit() -> int:
+            await process_exit.wait()
+            process.returncode = 0
+            return 0
+
+        async def pending_log() -> bytes:
+            await asyncio.Event().wait()
+            return b""
+
+        process.wait = AsyncMock(side_effect=wait_for_exit)
+        process.stdout = MagicMock()
+        process.stdout.readline = AsyncMock(side_effect=pending_log)
+        process.stderr = MagicMock()
+        process.stderr.readline = AsyncMock(side_effect=pending_log)
+        return process, process_exit
+
+    first_process, first_exit = process_fixture(43101)
+    second_process, second_exit = process_fixture(43102)
+    readiness_started = asyncio.Event()
+    readiness_calls = 0
+
+    async def readiness(
+        candidate_runtime: EndpointRuntime,
+        candidate_endpoint: ManagedEndpointConfig,
+    ) -> bool:
+        nonlocal readiness_calls
+        assert candidate_runtime is runtime
+        assert candidate_endpoint is endpoint
+        readiness_calls += 1
+        if readiness_calls == 1:
+            readiness_started.set()
+            await asyncio.Event().wait()
+        return True
+
+    def terminate_process_group(pid: int, sig: signal.Signals) -> None:
+        assert sig is signal.SIGTERM
+        if pid == first_process.pid:
+            first_exit.set()
+        elif pid == second_process.pid:
+            second_exit.set()
+        else:
+            raise AssertionError(f"unexpected managed process pid: {pid}")
+
+    request = _proxy_request(
+        "POST",
+        "managed",
+        headers={"content-type": "application/json"},
+        body=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+    )
+
+    with (
+        patch(
+            "asyncio.create_subprocess_exec",
+            side_effect=[first_process, second_process],
+        ) as create_exec,
+        patch.object(
+            router.process_manager,
+            "_wait_for_readiness",
+            new_callable=AsyncMock,
+            side_effect=readiness,
+        ),
+        patch.object(
+            router,
+            "_proxy_request",
+            new_callable=AsyncMock,
+            return_value=Response("ok", status_code=200),
+        ) as proxy_request,
+        patch("os.killpg", side_effect=terminate_process_group) as killpg,
+    ):
+        request_task = asyncio.create_task(router.catch_all_proxy(request))
+        await readiness_started.wait()
+
+        assert runtime.state is RuntimeState.STARTING
+        assert runtime.process is first_process
+        assert runtime.stdout_task is not None
+        assert runtime.stderr_task is not None
+        assert runtime.exit_task is not None
+
+        held_lease, held_rejection = await router._limiter.acquire(endpoint)
+        assert held_lease is None
+        assert held_rejection is not None
+
+        request_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request_task
+
+        assert runtime.state is RuntimeState.STOPPED
+        assert runtime.process is None
+        assert runtime.stdout_task is None
+        assert runtime.stderr_task is None
+        assert runtime.exit_task is None
+        assert runtime.restart_task is None
+        assert first_process.returncode == 0
+        proxy_request.assert_not_awaited()
+
+        recovered_lease, recovered_rejection = await router._limiter.acquire(endpoint)
+        assert recovered_rejection is None
+        assert recovered_lease is not None
+        await recovered_lease.release()
+
+        response = await router.catch_all_proxy(
+            _proxy_request(
+                "POST",
+                "managed",
+                headers={"content-type": "application/json"},
+                body=b'{"jsonrpc":"2.0","id":2,"method":"tools/list"}',
+            )
+        )
+        assert response.status_code == 200
+        assert runtime.state is RuntimeState.RUNNING
+        assert runtime.process is second_process
+        assert create_exec.call_count == 2
+        proxy_request.assert_awaited_once()
+
+        await router.process_manager.stop_managed_server(runtime)
+
+    killpg.assert_any_call(first_process.pid, signal.SIGTERM)
+    killpg.assert_any_call(second_process.pid, signal.SIGTERM)
+    assert first_process.returncode == 0
+    assert second_process.returncode == 0
+    assert runtime.state is RuntimeState.STOPPED
+    assert runtime.process is None
+    assert runtime.stdout_task is None
+    assert runtime.stderr_task is None
+    assert runtime.exit_task is None
+
+
+@pytest.mark.asyncio
 async def test_stopped_retired_runtime_is_draining_before_first_await() -> None:
     router = MCPRouter(Starlette(), "unused")
     old_config = managed_config(url="http://localhost:3033/mcp")

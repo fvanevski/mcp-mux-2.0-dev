@@ -160,6 +160,13 @@ class ProcessManager:
                 endpoint_cfg.url,
             )
             return endpoint_cfg.url
+        except asyncio.CancelledError:
+            # Startup owns the spawned process and its tasks until readiness
+            # succeeds. Request/supervisor cancellation must synchronously
+            # relinquish that ownership before the runtime becomes retryable.
+            runtime.failure_reason = None
+            await self._terminate_locked(runtime, final_state=RuntimeState.STOPPED)
+            raise
         except (OSError, RuntimeError, TimeoutError, ValueError, httpx.HTTPError) as exc:
             runtime.failure_reason = self._redact(str(exc))
             logger.error(

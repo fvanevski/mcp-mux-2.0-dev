@@ -1096,7 +1096,13 @@ class MCPRouter:
                 limit_lease,
             )
 
-        runtime_lease, activation_error = await self._acquire_upstream_lease(runtime)
+        try:
+            runtime_lease, activation_error = await self._acquire_upstream_lease(runtime)
+        except BaseException:
+            # Until runtime acquisition returns, only the request-limit lease is
+            # owned here. Cancellation during managed demand-start must not retain it.
+            await self._release_leases(limit_lease)
+            raise
         if activation_error is not None:
             await self._release_leases(limit_lease)
             return activation_error
