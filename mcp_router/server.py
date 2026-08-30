@@ -19,7 +19,6 @@ from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 
 import httpx
-import yaml
 from starlette.applications import Starlette
 from starlette.requests import ClientDisconnect, Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
@@ -30,9 +29,7 @@ from mcp_router.core.config_loader import (
     ManagedEndpointConfig,
     RouterConfig,
     SecurityConfig,
-    load_router_config,
-)
-from mcp_router.core.limits import LimitLease, RequestLimiter
+)from mcp_router.core.limits import LimitLease, RequestLimiter
 from mcp_router.core.policy import CapabilityPolicy
 from mcp_router.core.process_manager import ProcessManager
 from mcp_router.core.protocol import (
