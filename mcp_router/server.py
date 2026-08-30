@@ -4,7 +4,15 @@ import asyncio
 import logging
 import os
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterator,
+    Mapping,
+    MutableMapping,
+)
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from urllib.parse import urlparse, urlunparse
@@ -41,6 +49,12 @@ from mcp_router.core.protocol import (
     validate_protocol_request,
 )
 from mcp_router.core.redaction import SecretRedactor
+from mcp_router.core.runtime import (
+    EndpointRuntime,
+    RuntimeState,
+    RuntimeUnavailableError,
+    UpstreamLease,
+)
 from mcp_router.core.security import (
     GatewaySecurityMiddleware,
     build_upstream_headers,
@@ -204,17 +218,41 @@ def _endpoint_requires_runtime_reset(previous: Endpoint, candidate: Endpoint) ->
     return False
 
 
+class _EndpointConfigView(MutableMapping[str, Endpoint]):
+    """Compatibility mapping backed by the authoritative endpoint runtime registry."""
+
+    def __init__(self, router: MCPRouter) -> None:
+        self._router = router
+
+    def __getitem__(self, key: str) -> Endpoint:
+        return self._router._runtimes[key].config
+
+    def __setitem__(self, key: str, value: Endpoint) -> None:
+        if key != value.path:
+            raise ValueError("endpoint mapping key must match endpoint path")
+        self._router._runtimes[key] = EndpointRuntime.from_config(value)
+
+    def __delitem__(self, key: str) -> None:
+        del self._router._runtimes[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._router._runtimes)
+
+    def __len__(self) -> int:
+        return len(self._router._runtimes)
+
+
 class MCPRouter:
     def __init__(self, app: Starlette, config_path: str):
         self.app = app
         self.config_path = config_path
         self.process_manager = ProcessManager()
-        self._configs: dict[str, Endpoint] = {}
+        self._runtimes: dict[str, EndpointRuntime] = {}
+        self._config_view = _EndpointConfigView(self)
+        self._reload_lock = asyncio.Lock()
         self.max_request_body_bytes = _DEFAULT_MAX_REQUEST_BODY_BYTES
-        self.last_activity: dict[str, float] = {}
-        self.active_connections: dict[str, int] = {}
-        self.locks: dict[str, asyncio.Lock] = {}
         self.active_sessions: dict[str, BridgeSession] = {}
+        self._accepting_work = True
         self._running = False
         self._checker_task: asyncio.Task[None] | None = None
         self._http_client: httpx.AsyncClient | None = None
@@ -242,6 +280,17 @@ class MCPRouter:
             methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         )
 
+    @property
+    def _configs(self) -> MutableMapping[str, Endpoint]:
+        return self._config_view
+
+    @_configs.setter
+    def _configs(self, configs: Mapping[str, Endpoint]) -> None:
+        self._runtimes = {
+            path: EndpointRuntime.from_config(endpoint)
+            for path, endpoint in configs.items()
+        }
+
     async def open_http_client(self) -> httpx.AsyncClient:
         if self._http_client is None or self._http_client.is_closed:
             self._http_client = httpx.AsyncClient(limits=_HTTP_LIMITS)
@@ -256,36 +305,46 @@ class MCPRouter:
     async def _get_http_client(self) -> httpx.AsyncClient:
         return await self.open_http_client()
 
-    def apply_configuration(self, config: RouterConfig) -> None:
+    async def apply_configuration(self, config: RouterConfig) -> None:
+        """Drain runtime-affecting changes before atomically publishing a validated snapshot."""
         new_endpoints = {endpoint.path: endpoint for endpoint in config.endpoints}
-        self.max_request_body_bytes = config.max_request_body_bytes
-        self.security_config = config.security
-        self._redactor = SecretRedactor.from_router_config(config)
-        self.process_manager.set_redactor(self._redactor.redact)
 
-        to_stop: list[str] = []
-        for path in list(self._configs):
-            if path not in new_endpoints:
-                to_stop.append(path)
-            elif _endpoint_requires_runtime_reset(self._configs[path], new_endpoints[path]):
-                logger.info("Runtime-affecting config for %s changed, stopping it.", path)
-                to_stop.append(path)
+        async with self._reload_lock:
+            current_runtimes = self._runtimes
+            retired_paths = {
+                path
+                for path, runtime in current_runtimes.items()
+                if path not in new_endpoints
+                or _endpoint_requires_runtime_reset(runtime.config, new_endpoints[path])
+            }
 
-        for path in to_stop:
-            asyncio.create_task(self.process_manager.stop_managed_server(path))
-            self._configs.pop(path, None)
-            self.last_activity.pop(path, None)
-            self.locks.pop(path, None)
-            self._drop_sessions_for_path(path)
+            for path in sorted(retired_paths):
+                runtime = current_runtimes[path]
+                logger.info("Draining runtime-affecting configuration change for %s.", path)
+                await self.process_manager.drain_and_stop(runtime)
+                self._drop_sessions_for_path(path)
 
-        for path, endpoint in new_endpoints.items():
-            self._configs[path] = endpoint
-            if path not in self.locks:
-                self.locks[path] = asyncio.Lock()
+            next_runtimes: dict[str, EndpointRuntime] = {}
+            for path, endpoint in new_endpoints.items():
+                current = current_runtimes.get(path)
+                if current is not None and path not in retired_paths:
+                    current.config = endpoint
+                    next_runtimes[path] = current
+                else:
+                    next_runtimes[path] = EndpointRuntime.from_config(endpoint)
 
-        logger.info("Applied config. Active paths: %s", list(self._configs))
+            # No await occurs in this publication block: cooperative request handlers
+            # observe either the complete old snapshot or the complete new snapshot.
+            self._runtimes = next_runtimes
+            self.max_request_body_bytes = config.max_request_body_bytes
+            self.security_config = config.security
+            self._redactor = SecretRedactor.from_router_config(config)
+            self.process_manager.set_redactor(self._redactor.redact)
+
+        logger.info("Applied config. Active paths: %s", list(self._runtimes))
 
     def _drop_sessions_for_path(self, path_prefix: str) -> None:
+        runtime = self._runtimes.get(path_prefix)
         session_ids = [
             session_id
             for session_id, session in self.active_sessions.items()
@@ -293,26 +352,42 @@ class MCPRouter:
         ]
         for session_id in session_ids:
             self.active_sessions.pop(session_id, None)
+            if runtime is not None:
+                runtime.legacy_session_ids.discard(session_id)
 
     async def idle_timeout_checker(self) -> None:
         while self._running:
             try:
                 await asyncio.sleep(10)
-                current_time = time.time()
-                for path, endpoint in list(self._configs.items()):
-                    if endpoint.mode == "managed_cli" and self.process_manager.is_running(path):
-                        active_conns = self.active_connections.get(path, 0)
-                        if active_conns > 0:
-                            self.last_activity[path] = current_time
+                current_time = time.monotonic()
+                for runtime in list(self._runtimes.values()):
+                    endpoint = runtime.config
+                    if not isinstance(endpoint, ManagedEndpointConfig):
+                        continue
+                    if (
+                        runtime.state is not RuntimeState.RUNNING
+                        or not self.process_manager.is_running(runtime)
+                        or runtime.active_leases > 0
+                        or current_time - runtime.last_completed_activity <= endpoint.timeout
+                    ):
+                        continue
 
-                        last_activity = self.last_activity.get(path, 0)
-                        if current_time - last_activity > endpoint.timeout:
-                            logger.info(
-                                "Inactivity timeout (%ss) exceeded for %s. Stopping process.",
-                                endpoint.timeout,
-                                path,
-                            )
-                            await self.process_manager.stop_managed_server(path)
+                    async with runtime.lock:
+                        if (
+                            runtime.state is not RuntimeState.RUNNING
+                            or runtime.active_leases > 0
+                            or time.monotonic() - runtime.last_completed_activity <= endpoint.timeout
+                        ):
+                            continue
+                        runtime.state = RuntimeState.DRAINING
+
+                    await runtime.wait_for_leases()
+                    logger.info(
+                        "Inactivity timeout (%ss) exceeded for %s. Stopping process.",
+                        endpoint.timeout,
+                        runtime.path,
+                    )
+                    await self.process_manager.stop_managed_server(runtime)
             except asyncio.CancelledError:
                 break
             except (OSError, RuntimeError, ValueError) as exc:
@@ -322,11 +397,15 @@ class MCPRouter:
         del request
         summary_list = [
             {
-                "path": config.path,
-                "mode": config.mode,
-                "summary": config.summary,
+                "path": runtime.config.path,
+                "mode": runtime.config.mode,
+                "summary": runtime.config.summary,
+                "runtime_state": runtime.state.value,
+                "active_upstream_leases": runtime.active_leases,
+                "last_exit_code": runtime.last_exit_code,
+                "restart_attempts": runtime.restart_attempts,
             }
-            for config in self._configs.values()
+            for runtime in self._runtimes.values()
         ]
         return JSONResponse({"endpoints": summary_list})
 
@@ -382,26 +461,35 @@ class MCPRouter:
             return _jsonrpc_error_response(exc)
         return body, parsed, era
 
-    async def _ensure_managed_server(self, path_prefix: str, endpoint: Endpoint) -> JSONResponse | None:
-        if endpoint.mode != "managed_cli":
-            return None
-        async with self.locks[path_prefix]:
-            if self.process_manager.is_running(path_prefix):
-                return None
-            logger.info("On-demand activation triggered for: %s", path_prefix)
-            try:
-                await self.process_manager.start_managed_server(endpoint)
-            except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
-                logger.error(
-                    "Failed to start managed server %s: %s",
-                    path_prefix,
-                    self._redactor.redact(str(exc)),
-                )
-                return JSONResponse(
-                    {"error": "Failed to start managed server"},
-                    status_code=500,
-                )
-        return None
+    async def _acquire_upstream_lease(
+        self,
+        runtime: EndpointRuntime,
+    ) -> tuple[UpstreamLease | None, JSONResponse | None]:
+        if not self._accepting_work:
+            return None, JSONResponse({"error": "Gateway is shutting down"}, status_code=503)
+
+        if runtime.managed:
+            if runtime.state is RuntimeState.DRAINING:
+                return None, JSONResponse({"error": "Managed endpoint is draining"}, status_code=503)
+            if not self.process_manager.is_running(runtime) or runtime.state is not RuntimeState.RUNNING:
+                logger.info("On-demand activation triggered for: %s", runtime.path)
+                try:
+                    await self.process_manager.start_managed_server(runtime)
+                except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
+                    logger.error(
+                        "Failed to start managed server %s: %s",
+                        runtime.path,
+                        self._redactor.redact(str(exc)),
+                    )
+                    return None, JSONResponse(
+                        {"error": "Failed to start managed server"},
+                        status_code=500,
+                    )
+
+        try:
+            return await runtime.acquire_lease(), None
+        except RuntimeUnavailableError:
+            return None, JSONResponse({"error": "Endpoint runtime unavailable"}, status_code=503)
 
     def _forward_headers(self, request: Request, endpoint: Endpoint) -> dict[str, str]:
         headers = build_upstream_headers(request.headers, endpoint)
@@ -443,27 +531,36 @@ class MCPRouter:
                 return principal
         return "local"
 
-    async def _finish_limited_response(
+    @staticmethod
+    async def _release_leases(
+        *leases: LimitLease | UpstreamLease | None,
+    ) -> None:
+        for lease in leases:
+            if lease is not None:
+                await lease.release()
+
+    async def _finish_leased_response(
         self,
         response: Response,
-        lease: LimitLease | None,
+        *leases: LimitLease | UpstreamLease | None,
     ) -> Response:
-        if lease is None:
+        active_leases = tuple(lease for lease in leases if lease is not None)
+        if not active_leases:
             return response
         if not isinstance(response, StreamingResponse):
-            await lease.release()
+            await self._release_leases(*active_leases)
             return response
 
         original_iterator = response.body_iterator
 
-        async def limited_iterator() -> AsyncIterator[bytes | memoryview | str]:
+        async def leased_iterator() -> AsyncIterator[bytes | memoryview | str]:
             try:
                 async for chunk in original_iterator:
                     yield chunk
             finally:
-                await lease.release()
+                await self._release_leases(*active_leases)
 
-        response.body_iterator = limited_iterator()
+        response.body_iterator = leased_iterator()
         return response
 
     async def sse_proxy_generator(
