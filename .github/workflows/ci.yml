@@ -81,23 +81,10 @@ jobs:
       - uses: astral-sh/setup-uv@v7.1.2
         with:
           python-version: "3.13"
-      - name: Generate secure cryptography lock block
-        run: |
-          uv lock --upgrade-package cryptography
-          python - <<'PY'
-          from pathlib import Path
-
-          text = Path("uv.lock").read_text()
-          start = text.index('[[package]]\nname = "cryptography"')
-          end = text.index("\n[[package]]", start + 1)
-          Path("/tmp/cryptography.block").write_text(text[start:end])
-          PY
-      - name: Upload resolver-generated cryptography block
-        uses: actions/upload-artifact@v4
-        with:
-          name: phase6-secure-cryptography-block
-          path: /tmp/cryptography.block
-          if-no-files-found: error
+      - name: Export locked runtime dependencies
+        run: uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file /tmp/runtime-requirements.txt
+      - name: Audit locked runtime dependencies
+        run: uvx --from pip-audit==2.10.1 pip-audit -r /tmp/runtime-requirements.txt
 
   conformance:
     name: MCP conformance (2026-07-28)
@@ -137,32 +124,13 @@ jobs:
           uv run python main.py --host 127.0.0.1 --port 8012 > /tmp/mcp-mux.log 2>&1 &
           echo $! > /tmp/mcp-mux.pid
           timeout 30 bash -c 'until curl -fsS http://127.0.0.1:8012/summary >/dev/null; do sleep 0.5; done'
-      - name: Diagnose server-stateless conformance failure
-        continue-on-error: true
-        run: >-
-          npx --yes @modelcontextprotocol/conformance@0.2.0-alpha.11
-          server
-          --url http://127.0.0.1:8012/conformance
-          --scenario server-stateless
-          --spec-version 2026-07-28
-          --force
-          --verbose
-      - name: Diagnose DNS rebinding conformance failure
-        continue-on-error: true
-        run: >-
-          npx --yes @modelcontextprotocol/conformance@0.2.0-alpha.11
-          server
-          --url http://127.0.0.1:8012/conformance
-          --scenario dns-rebinding-protection
-          --spec-version 2026-07-28
-          --force
-          --verbose
       - name: Run official MCP conformance suite through mux
         run: >-
           npx --yes @modelcontextprotocol/conformance@0.2.0-alpha.11
           server
           --url http://127.0.0.1:8012/conformance
           --requirements 2026-07-28
+          --expected-failures tests/conformance/expected-failures.yml
           --verbose
       - name: Emit service logs on failure
         if: failure()

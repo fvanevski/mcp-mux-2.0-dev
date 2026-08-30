@@ -5,6 +5,7 @@ import ipaddress
 import re
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from typing import Any
+from urllib.parse import urlsplit
 
 from starlette.responses import JSONResponse
 
@@ -78,6 +79,28 @@ def is_loopback_host(host: str) -> bool:
         return ipaddress.ip_address(candidate).is_loopback
     except ValueError:
         return False
+
+
+def _origin_allowed(value: str, security: SecurityConfig) -> bool:
+    if value in security.allowed_origins:
+        return True
+    if security.mode != "local_only":
+        return False
+    try:
+        parsed = urlsplit(value)
+        _ = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme in {"http", "https"}
+        and parsed.hostname is not None
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.path in {"", "/"}
+        and not parsed.query
+        and not parsed.fragment
+        and is_loopback_host(parsed.hostname)
+    )
 
 
 def validate_bind_security(host: str, security: SecurityConfig) -> None:
@@ -235,7 +258,7 @@ class GatewaySecurityMiddleware:
             return
 
         origin = headers.get("origin")
-        if origin is not None and origin not in security.allowed_origins:
+        if origin is not None and not _origin_allowed(origin, security):
             await self._reject(scope, receive, send, 403, "Invalid Origin")
             return
 
