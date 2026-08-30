@@ -41,7 +41,7 @@ class EndpointRuntime:
     failure_reason: str | None = None
     restart_attempts: int = 0
     legacy_session_ids: set[str] = field(default_factory=set, repr=False)
-    legacy_tasks: set[asyncio.Task[None]] = field(default_factory=set, repr=False)
+    legacy_tasks: set[asyncio.Task[object]] = field(default_factory=set, repr=False)
     _lease_condition: asyncio.Condition = field(default_factory=asyncio.Condition, repr=False)
 
     @classmethod
@@ -79,7 +79,7 @@ class EndpointRuntime:
         async with self._lease_condition:
             await self._lease_condition.wait_for(lambda: self.active_leases == 0)
 
-    def track_legacy_task(self, task: asyncio.Task[None]) -> None:
+    def track_legacy_task(self, task: asyncio.Task[object]) -> None:
         self.legacy_tasks.add(task)
         task.add_done_callback(self.legacy_tasks.discard)
 

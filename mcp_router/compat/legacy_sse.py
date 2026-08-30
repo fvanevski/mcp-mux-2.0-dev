@@ -14,7 +14,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from mcp_router.core.config_loader import Endpoint, LegacySSEBridgeConfig
 from mcp_router.core.policy import CapabilityPolicy
-from mcp_router.core.runtime import EndpointRuntime
+from mcp_router.core.runtime import EndpointRuntime, RuntimeState
 from mcp_router.core.sse import iter_sse_events, render_sse_event, transform_sse_event
 
 _MAX_TOMBSTONES = 4096
@@ -78,6 +78,7 @@ class BridgeSession:
     created_at: float
     expires_at: float
     remote_session_id: str | None = None
+    setup_tasks: set[asyncio.Task[object]] = field(default_factory=set, repr=False)
     response_tasks: set[asyncio.Task[None]] = field(default_factory=set, repr=False)
     upstreams: set[_TrackedUpstream] = field(default_factory=set, repr=False)
     expiry_task: asyncio.Task[None] | None = field(default=None, repr=False)
@@ -252,7 +253,10 @@ class LegacySSEBridge:
             forward_headers.pop("mcp-session-id", None)
         forward_headers["accept"] = "application/json, text/event-stream"
 
-        try:
+        async def establish_upstream() -> tuple[
+            AbstractAsyncContextManager[httpx.Response],
+            httpx.Response,
+        ]:
             client = await self._client_provider()
             stream_context = client.stream(
                 method="POST",
@@ -266,6 +270,17 @@ class LegacySSEBridge:
                 stream_context.__aenter__(),
                 timeout=endpoint.upstream_timeout,
             )
+            return stream_context, response
+
+        setup_task = asyncio.create_task(
+            establish_upstream(),
+            name=f"mcp-mux:{path_prefix}:legacy-setup",
+        )
+        session.setup_tasks.add(setup_task)
+        setup_task.add_done_callback(session.setup_tasks.discard)
+        runtime.track_legacy_task(setup_task)
+        try:
+            stream_context, response = await setup_task
         except (
             TimeoutError,
             httpx.HTTPError,
@@ -285,12 +300,34 @@ class LegacySSEBridge:
             )
 
         tracked = _TrackedUpstream(stream_context)
-        session.upstreams.add(tracked)
-        remote_session_id = response.headers.get("mcp-session-id")
-        if remote_session_id:
-            session.remote_session_id = remote_session_id
+
+        def post_setup_rejection() -> Response | None:
+            if session.closed.is_set() or self._sessions.get(session_id) is not session:
+                closed = self._closed_sessions.get(session_id)
+                if closed is not None and closed.path_prefix == path_prefix:
+                    return JSONResponse(
+                        {"error": closed.message},
+                        status_code=closed.status_code,
+                    )
+                return JSONResponse(
+                    {"error": "Legacy SSE session closed during upstream setup"},
+                    status_code=410,
+                )
+            if runtime.state is RuntimeState.DRAINING:
+                return JSONResponse(
+                    {"error": "Endpoint runtime is draining"},
+                    status_code=503,
+                )
+            return None
 
         if not 200 <= response.status_code < 300:
+            async with session.cleanup_lock:
+                rejection = post_setup_rejection()
+                if rejection is None:
+                    session.upstreams.add(tracked)
+            if rejection is not None:
+                await tracked.close()
+                return await finish(rejection)
             self._metric(path_prefix).upstream_failures_total += 1
             detail = ""
             try:
@@ -399,13 +436,23 @@ class LegacySSEBridge:
                     if on_complete is not None:
                         await on_complete()
 
-        response_task = asyncio.create_task(
-            process_response(),
-            name=f"mcp-mux:{path_prefix}:legacy-response",
-        )
-        session.response_tasks.add(response_task)
-        response_task.add_done_callback(session.response_tasks.discard)
-        runtime.track_legacy_task(response_task)
+        async with session.cleanup_lock:
+            rejection = post_setup_rejection()
+            if rejection is None:
+                session.upstreams.add(tracked)
+                remote_session_id = response.headers.get("mcp-session-id")
+                if remote_session_id:
+                    session.remote_session_id = remote_session_id
+                response_task = asyncio.create_task(
+                    process_response(),
+                    name=f"mcp-mux:{path_prefix}:legacy-response",
+                )
+                session.response_tasks.add(response_task)
+                response_task.add_done_callback(session.response_tasks.discard)
+                runtime.track_legacy_task(response_task)
+        if rejection is not None:
+            await tracked.close()
+            return await finish(rejection)
         return Response("Accepted", status_code=202)
 
     async def close_endpoint(self, path_prefix: str) -> None:
@@ -539,7 +586,10 @@ class LegacySSEBridge:
         session.closed.set()
 
         current = asyncio.current_task()
-        tasks: list[asyncio.Task[None]] = list(session.response_tasks)
+        tasks: list[asyncio.Task[object]] = [
+            *session.setup_tasks,
+            *session.response_tasks,
+        ]
         if session.expiry_task is not None:
             tasks.append(session.expiry_task)
         for task in tasks:
@@ -559,7 +609,10 @@ class LegacySSEBridge:
 
             current = asyncio.current_task()
             excluded = {task for task in (exclude_task, current) if task is not None}
-            tasks: list[asyncio.Task[None]] = list(session.response_tasks)
+            tasks: list[asyncio.Task[object]] = [
+                *session.setup_tasks,
+                *session.response_tasks,
+            ]
             if session.expiry_task is not None:
                 tasks.append(session.expiry_task)
             owned_tasks = [

@@ -317,6 +317,148 @@ async def test_bridge_disconnect_cancels_response_and_closes_upstream() -> None:
 
 
 @pytest.mark.asyncio
+async def test_bridge_disconnect_during_upstream_setup_cannot_recreate_owned_work() -> None:
+    router = MCPRouter(Starlette(), "unused")
+    endpoint = _endpoint(path="legacy", bridge={"max_sessions": 2})
+    router._configs = {"legacy": endpoint}
+    bridge, session, iterator = await _open_bridge(router, "legacy")
+
+    setup_started = asyncio.Event()
+    setup_cancelled = asyncio.Event()
+    release_setup = asyncio.Event()
+
+    upstream_response = MagicMock()
+    upstream_response.status_code = 200
+    upstream_response.headers = httpx.Headers({"content-type": "text/event-stream"})
+
+    async def blocked_enter():
+        setup_started.set()
+        try:
+            await release_setup.wait()
+        except asyncio.CancelledError:
+            setup_cancelled.set()
+            await release_setup.wait()
+        return upstream_response
+
+    stream_context = MagicMock()
+    stream_context.__aenter__ = AsyncMock(side_effect=blocked_enter)
+    stream_context.__aexit__ = AsyncMock(return_value=None)
+    client = MagicMock()
+    client.stream = MagicMock(return_value=stream_context)
+    bridge._client_provider = AsyncMock(return_value=client)
+
+    post_task = asyncio.create_task(
+        router.catch_all_proxy(
+            _request(
+                "POST",
+                "legacy",
+                headers={"content-type": "application/json"},
+                query_string=f"session_id={session.session_id}".encode(),
+                body=_legacy_body(),
+            )
+        )
+    )
+    await asyncio.wait_for(setup_started.wait(), timeout=0.2)
+    assert session.runtime.active_leases == 1
+
+    close_task = asyncio.create_task(iterator.aclose())
+    await asyncio.wait_for(setup_cancelled.wait(), timeout=0.2)
+    release_setup.set()
+
+    await asyncio.wait_for(close_task, timeout=0.2)
+    post_response = await asyncio.wait_for(post_task, timeout=0.2)
+
+    assert post_response.status_code == 410
+    assert session.closed.is_set()
+    assert session.session_id not in bridge.sessions
+    assert session.setup_tasks == set()
+    assert session.response_tasks == set()
+    assert session.runtime.legacy_tasks == set()
+    assert session.runtime.active_leases == 0
+    assert session.upstreams == set()
+    stream_context.__aexit__.assert_awaited_once_with(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_runtime_retirement_during_bridge_setup_cannot_deadlock() -> None:
+    router = MCPRouter(Starlette(), "unused")
+    endpoint = _endpoint(path="legacy", bridge={"max_sessions": 2})
+    router._configs = {"legacy": endpoint}
+    bridge, session, iterator = await _open_bridge(router, "legacy")
+    old_runtime = session.runtime
+
+    setup_started = asyncio.Event()
+    setup_cancelled = asyncio.Event()
+    release_setup = asyncio.Event()
+
+    upstream_response = MagicMock()
+    upstream_response.status_code = 200
+    upstream_response.headers = httpx.Headers({"content-type": "text/event-stream"})
+
+    async def blocked_enter():
+        setup_started.set()
+        try:
+            await release_setup.wait()
+        except asyncio.CancelledError:
+            setup_cancelled.set()
+            await release_setup.wait()
+        return upstream_response
+
+    stream_context = MagicMock()
+    stream_context.__aenter__ = AsyncMock(side_effect=blocked_enter)
+    stream_context.__aexit__ = AsyncMock(return_value=None)
+    client = MagicMock()
+    client.stream = MagicMock(return_value=stream_context)
+    bridge._client_provider = AsyncMock(return_value=client)
+
+    post_task = asyncio.create_task(
+        router.catch_all_proxy(
+            _request(
+                "POST",
+                "legacy",
+                headers={"content-type": "application/json"},
+                query_string=f"session_id={session.session_id}".encode(),
+                body=_legacy_body(),
+            )
+        )
+    )
+    await asyncio.wait_for(setup_started.wait(), timeout=0.2)
+    assert old_runtime.active_leases == 1
+
+    replacement = RouterConfig.model_validate(
+        {
+            "endpoints": [
+                {
+                    "path": "legacy",
+                    "mode": "remote",
+                    "url": "https://replacement.example.test/mcp",
+                    "summary": "Replacement fixture",
+                    "transport": "streamable-http",
+                    "legacy_sse_bridge": {},
+                }
+            ]
+        }
+    )
+    reload_task = asyncio.create_task(router.apply_configuration(replacement))
+    await asyncio.wait_for(setup_cancelled.wait(), timeout=0.2)
+    release_setup.set()
+
+    post_response = await asyncio.wait_for(post_task, timeout=0.2)
+    await asyncio.wait_for(reload_task, timeout=0.2)
+
+    assert post_response.status_code == 503
+    assert old_runtime.active_leases == 0
+    assert old_runtime.legacy_tasks == set()
+    assert session.setup_tasks == set()
+    assert session.response_tasks == set()
+    assert session.session_id not in bridge.sessions
+    assert session.upstreams == set()
+    assert router._runtimes["legacy"] is not old_runtime
+    stream_context.__aexit__.assert_awaited_once_with(None, None, None)
+    await iterator.aclose()
+
+
+@pytest.mark.asyncio
 async def test_bridge_ttl_expires_session_and_rejects_replay() -> None:
     router = MCPRouter(Starlette(), "unused")
     endpoint = _endpoint(
