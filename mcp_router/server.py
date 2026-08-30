@@ -556,6 +556,9 @@ class MCPRouter:
                 async for chunk in original_iterator:
                     yield chunk
             finally:
+                close_iterator = getattr(original_iterator, "aclose", None)
+                if close_iterator is not None:
+                    await close_iterator()
                 await self._release_leases(*active_leases)
 
         response.body_iterator = leased_iterator()

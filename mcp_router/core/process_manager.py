@@ -10,7 +10,11 @@ from typing import Any
 import httpx
 
 from .config_loader import ManagedEndpointConfig
-from .protocol import CLIENT_CAPABILITIES_META, MODERN_PROTOCOL_VERSION, PROTOCOL_VERSION_META
+from .protocol import (
+    CLIENT_CAPABILITIES_META,
+    MODERN_PROTOCOL_VERSION,
+    PROTOCOL_VERSION_META,
+)
 from .runtime import EndpointRuntime, RuntimeState
 
 logger = logging.getLogger(__name__)
@@ -257,10 +261,7 @@ class ProcessManager:
         runtime: EndpointRuntime,
         proc: asyncio.subprocess.Process,
     ) -> None:
-        try:
-            returncode = await proc.wait()
-        except asyncio.CancelledError:
-            raise
+        returncode = await proc.wait()
 
         async with runtime.lock:
             if runtime.process is not proc:

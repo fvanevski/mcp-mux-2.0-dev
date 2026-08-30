@@ -8,7 +8,7 @@ import pytest
 from pydantic import ValidationError
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import StreamingResponse
+from starlette.responses import Response, StreamingResponse
 
 from mcp_router.core.config_loader import ManagedEndpointConfig, RouterConfig
 from mcp_router.core.process_manager import ProcessManager
@@ -115,7 +115,8 @@ async def test_runtime_lease_spans_stream_lifetime() -> None:
         yield b"first"
         await asyncio.Event().wait()
 
-    response = await router._finish_leased_response(StreamingResponse(body()), lease)
+    response: Response = await router._finish_leased_response(StreamingResponse(body()), lease)
+    assert isinstance(response, StreamingResponse)
     iterator = response.body_iterator.__aiter__()
 
     assert await anext(iterator) == b"first"
@@ -201,7 +202,9 @@ async def test_local_legacy_sse_connection_does_not_start_or_lease_managed_runti
     assert runtime.state is RuntimeState.STOPPED
     assert runtime.active_leases == 0
     start_managed.assert_not_awaited()
-    await response.body_iterator.aclose()
+    body_iterator = response.body_iterator.__aiter__()
+    close_iterator = getattr(body_iterator, "aclose")
+    await close_iterator()
 
 
 @pytest.mark.asyncio

@@ -169,7 +169,7 @@ async def test_authenticated_gateway_consumes_caller_key_and_injects_upstream_ke
             ],
         }
     )
-    isolated.apply_configuration(config)
+    await isolated.apply_configuration(config)
 
     _, stream_context = json_upstream_response(
         b'{"jsonrpc":"2.0","id":1,"result":{"echo":"Bearer upstream-secret custom-secret"}}',
@@ -287,7 +287,7 @@ class SplitTextStreamResponse:
 @pytest.mark.asyncio
 async def test_text_stream_redaction_handles_secret_split_across_chunks() -> None:
     isolated = MCPRouter(Starlette(), "/tmp/not-used.yaml")
-    isolated.apply_configuration(
+    await isolated.apply_configuration(
         RouterConfig.model_validate(
             {
                 "endpoints": [
@@ -535,7 +535,6 @@ async def test_denied_managed_tool_does_not_start_process() -> None:
             allowed_tools=["safe_tool"],
         )
     }
-    isolated.locks["example"] = asyncio.Lock()
     request = direct_request(
         body={
             "jsonrpc": "2.0",
@@ -611,7 +610,6 @@ async def test_policy_only_reload_does_not_restart_managed_process_or_drop_sessi
         legacy_sse_bridge=True,
     )
     isolated._configs = {"example": previous}
-    isolated.locks["example"] = asyncio.Lock()
     isolated.active_sessions["session"] = BridgeSession(
         path_prefix="example",
         queue=asyncio.Queue(),
@@ -638,8 +636,7 @@ async def test_policy_only_reload_does_not_restart_managed_process_or_drop_sessi
         "stop_managed_server",
         new=AsyncMock(),
     ) as stop_managed:
-        isolated.apply_configuration(updated)
-        await asyncio.sleep(0)
+        await isolated.apply_configuration(updated)
 
     stop_managed.assert_not_awaited()
     assert "session" in isolated.active_sessions
