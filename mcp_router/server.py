@@ -626,7 +626,7 @@ class MCPRouter:
                             )
                         except StopAsyncIteration:
                             break
-                        await session.queue.put(line)
+                        await session.queue.put(self._redactor.redact(line))
             except asyncio.CancelledError:
                 raise
             except (httpx.HTTPError, OSError, RuntimeError, UnicodeError, ValueError) as exc:
@@ -833,8 +833,55 @@ class MCPRouter:
                 "MCP 2026-07-28 Streamable HTTP uses POST only",
             )
 
+        principal = self._principal(request)
+        policy = CapabilityPolicy.from_endpoint(endpoint)
+        request_name: str | None = None
+        if parsed_request is not None:
+            request_name = extract_request_name(parsed_request)
+            decision = policy.authorize(
+                principal=principal,
+                endpoint=path_prefix,
+                method=parsed_request.method,
+                name=request_name,
+            )
+            if not decision.allowed:
+                if parsed_request.request_id is None:
+                    return Response(status_code=403)
+                return JSONResponse(
+                    build_jsonrpc_error(
+                        CAPABILITY_DENIED,
+                        "Capability denied by endpoint policy",
+                        request_id=parsed_request.request_id,
+                    ),
+                    status_code=403,
+                )
+
+        tool_limit_name = (
+            request_name
+            if parsed_request is not None and parsed_request.method == "tools/call"
+            else None
+        )
+        limit_lease, limit_rejection = await self._limiter.acquire(
+            endpoint,
+            capability_name=tool_limit_name,
+        )
+        if limit_rejection is not None:
+            if parsed_request is None or parsed_request.request_id is None:
+                return Response(status_code=429)
+            return JSONResponse(
+                build_jsonrpc_error(
+                    REQUEST_LIMITED,
+                    "Endpoint request limit exceeded",
+                    request_id=parsed_request.request_id,
+                    data={"scope": limit_rejection.scope},
+                ),
+                status_code=429,
+            )
+
         activation_error = await self._ensure_managed_server(path_prefix, endpoint)
         if activation_error is not None:
+            if limit_lease is not None:
+                await limit_lease.release()
             return activation_error
 
         request_path = request.url.path
@@ -859,9 +906,12 @@ class MCPRouter:
 
         if is_get and endpoint.transport == "streamable-http":
             if not is_sse_init:
-                return _transport_error_response(
-                    405,
-                    "Use POST for Streamable HTTP JSON-RPC, or a supported legacy SSE GET",
+                return await self._finish_limited_response(
+                    _transport_error_response(
+                        405,
+                        "Use POST for Streamable HTTP JSON-RPC, or a supported legacy SSE GET",
+                    ),
+                    limit_lease,
                 )
             if endpoint.legacy_sse_bridge:
                 session_id = uuid4().hex
@@ -870,31 +920,38 @@ class MCPRouter:
                     path_prefix=path_prefix,
                     queue=queue,
                 )
-                return StreamingResponse(
-                    self.local_sse_generator(session_id, queue, path_prefix),
+                return await self._finish_limited_response(
+                    StreamingResponse(
+                        self.local_sse_generator(session_id, queue, path_prefix),
+                        media_type="text/event-stream",
+                        headers={
+                            "Cache-Control": "no-cache",
+                            "Connection": "keep-alive",
+                            "X-Accel-Buffering": "no",
+                        },
+                    ),
+                    limit_lease,
+                )
+
+        if is_get and endpoint.transport == "sse" and is_sse_init:
+            return await self._finish_limited_response(
+                StreamingResponse(
+                    self.sse_proxy_generator(
+                        target_url,
+                        forward_headers,
+                        dict(request.query_params),
+                        path_prefix,
+                        endpoint.upstream_timeout,
+                        principal,
+                    ),
                     media_type="text/event-stream",
                     headers={
                         "Cache-Control": "no-cache",
                         "Connection": "keep-alive",
                         "X-Accel-Buffering": "no",
                     },
-                )
-
-        if is_get and endpoint.transport == "sse" and is_sse_init:
-            return StreamingResponse(
-                self.sse_proxy_generator(
-                    target_url,
-                    forward_headers,
-                    dict(request.query_params),
-                    path_prefix,
-                    endpoint.upstream_timeout,
                 ),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no",
-                },
+                limit_lease,
             )
 
         session_id = request.query_params.get("session_id")
@@ -912,16 +969,22 @@ class MCPRouter:
                 forward_headers=forward_headers,
                 request_body=request_body,
                 session_id=session_id,
+                policy=policy,
+                principal=principal,
+                on_complete=None if limit_lease is None else limit_lease.release,
             )
 
-        return await self._proxy_request(
+        response = await self._proxy_request(
             request=request,
             endpoint=endpoint,
             path_prefix=path_prefix,
             target_url=target_url,
             forward_headers=forward_headers,
             request_body=request_body,
+            policy=policy,
+            principal=principal,
         )
+        return await self._finish_limited_response(response, limit_lease)
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -963,11 +1026,4 @@ async def lifespan(app: Starlette):
 
 
 app = Starlette(lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 router = MCPRouter(app, CONFIG_PATH)
