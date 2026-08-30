@@ -15,7 +15,7 @@ security:
   allowed_origins: []
 ```
 
-`local_only` requires a loopback immediate peer, validates the `Host` header against `allowed_hosts`, and rejects every present `Origin` that is not explicitly listed. The command-line launcher also refuses a non-loopback `--host` while this mode is active. There is no wildcard credentialed CORS path.
+`local_only` requires a loopback immediate peer, validates the `Host` header against `allowed_hosts`, and rejects every present `Origin` that is not explicitly listed. The command-line launcher also refuses a non-loopback `--host` while this mode is active. There is no wildcard credentialed CORS path. Do not place `local_only` behind an externally reachable reverse proxy: a same-host proxy is itself a loopback peer and therefore cannot preserve the local-only trust boundary. Any externally reachable or reverse-proxied deployment must use `authenticated` mode.
 
 Non-local binding requires `security.mode: authenticated` and at least one explicit authentication provider. Direct callers may authenticate with a gateway API key supplied as `Authorization: Bearer <key>`:
 
