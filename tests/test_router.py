@@ -15,6 +15,7 @@ from mcp_router.core.config_loader import (
     expand_env_vars,
 )
 from mcp_router.core.process_manager import ProcessManager
+from mcp_router.core.runtime import EndpointRuntime, RuntimeState
 from mcp_router.server import BridgeSession, app, filter_tools_response, router
 
 # --- Config Loader Tests ---
@@ -240,40 +241,58 @@ async def test_wait_for_port_bounds_connection_attempt_by_remaining_deadline(mon
 @pytest.mark.asyncio
 async def test_process_manager_lifecycle():
     pm = ProcessManager()
-    # Reset singleton internal state for testing
-    pm._processes.clear()
-    pm._log_tasks.clear()
-
     cfg = ManagedEndpointConfig(
         path="mock-mcp",
         mode="managed_cli",
         argv=["python", "-m", "http.server", "8099"],
         url="http://localhost:8099/mcp",
-        summary="Mock python server"
+        summary="Mock python server",
     )
+    runtime = EndpointRuntime.from_config(cfg)
 
-    # Mock safe argv execution and readiness.
-    mock_proc = AsyncMock()
+    process_exit = asyncio.Event()
+    log_exit = asyncio.Event()
+
+    async def wait_for_exit() -> int:
+        await process_exit.wait()
+        mock_proc.returncode = 0
+        return 0
+
+    async def wait_for_log_eof() -> bytes:
+        await log_exit.wait()
+        return b""
+
+    mock_proc = MagicMock()
     mock_proc.pid = 99999
     mock_proc.returncode = None
-    mock_proc.stdout = AsyncMock()
-    mock_proc.stderr = AsyncMock()
+    mock_proc.wait = AsyncMock(side_effect=wait_for_exit)
+    mock_proc.stdout = MagicMock()
+    mock_proc.stdout.readline = AsyncMock(side_effect=wait_for_log_eof)
+    mock_proc.stderr = MagicMock()
+    mock_proc.stderr.readline = AsyncMock(side_effect=wait_for_log_eof)
 
-    with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec, \
-         patch.object(pm, "_wait_for_port", return_value=True) as mock_wait:
-        
-        target_url = await pm.start_managed_server(cfg)
-        
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec,
+        patch.object(pm, "_wait_for_readiness", return_value=True) as mock_readiness,
+    ):
+        target_url = await pm.start_managed_server(runtime)
+
         assert target_url == "http://localhost:8099/mcp"
         assert mock_exec.call_args.args == ("python", "-m", "http.server", "8099")
-        mock_wait.assert_called_once_with(8099, host="localhost", timeout=15.0, interval=0.2)
-        assert "mock-mcp" in pm._processes
+        assert mock_exec.call_args.kwargs["start_new_session"] is True
+        mock_readiness.assert_awaited_once_with(runtime, cfg)
+        assert runtime.state is RuntimeState.RUNNING
+        assert runtime.process is mock_proc
 
-        # Test stop
-        with patch("os.killpg") as mock_killpg, patch("os.getpgid", return_value=123):
-            await pm.stop_managed_server("mock-mcp")
-            mock_killpg.assert_called_once_with(123, 15)  # signal.SIGTERM is 15
-            assert "mock-mcp" not in pm._processes
+        with patch("os.killpg", side_effect=lambda *_: process_exit.set()) as mock_killpg:
+            await pm.stop_managed_server(runtime)
+
+        mock_killpg.assert_called_once_with(99999, 15)
+        assert runtime.state is RuntimeState.STOPPED
+        assert runtime.process is None
+        assert runtime.stdout_task is None
+        assert runtime.stderr_task is None
+        assert runtime.exit_task is None
 
 # --- Routes & App Tests ---
 
@@ -1004,8 +1023,7 @@ async def test_apply_configuration_drops_sessions_for_removed_or_changed_endpoin
         ]
     })
 
-    router.apply_configuration(new_config)
-    await asyncio.sleep(0)
+    await router.apply_configuration(new_config)
 
     assert "weather-session" not in router.active_sessions
     assert "files-session" not in router.active_sessions
