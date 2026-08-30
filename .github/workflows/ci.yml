@@ -143,6 +143,7 @@ jobs:
           server
           --url http://127.0.0.1:8012/conformance
           --requirements 2026-07-28
+          --verbose
       - name: Emit service logs on failure
         if: failure()
         run: |
