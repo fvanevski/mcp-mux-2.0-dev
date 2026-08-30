@@ -25,7 +25,7 @@ from mcp_router.core.config_loader import (
 from mcp_router.core.policy import CapabilityPolicy
 from mcp_router.core.process_manager import ProcessManager
 from mcp_router.core.runtime import EndpointRuntime, RuntimeState
-from mcp_router.server import BridgeSession, MCPRouter
+from mcp_router.server import MCPRouter
 
 
 def _find_unused_loopback_port() -> int:
@@ -52,13 +52,14 @@ def managed_config(
         "url": url,
         "summary": "Managed fixture",
         "timeout": 30,
-        "legacy_sse_bridge": legacy_sse_bridge,
         "readiness": {
             "timeout": readiness_timeout,
             "interval": readiness_interval,
             "legacy_initialize_fallback": legacy_fallback,
         },
     }
+    if legacy_sse_bridge:
+        data["legacy_sse_bridge"] = {}
     if headers is not None:
         data["headers"] = headers
     if restart is not None:
