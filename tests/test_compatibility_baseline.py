@@ -122,7 +122,7 @@ async def test_operator_verified_modern_client_scenarios(scenario_id: str, names
     upstream = MockMCPUpstream("modern-stateless")
     inbound_transport = httpx.ASGITransport(app=app)
 
-    async with httpx.AsyncClient(transport=inbound_transport, base_url="http://mux.local") as client:
+    async with httpx.AsyncClient(transport=inbound_transport, base_url="http://localhost") as client:
         with patch(
             "mcp_router.server.httpx.AsyncClient",
             side_effect=_outbound_client_factory(upstream),
@@ -322,7 +322,7 @@ async def test_legacy_sessionful_streamable_http_baseline():
     upstream = MockMCPUpstream("legacy-sessionful")
     inbound_transport = httpx.ASGITransport(app=app)
 
-    async with httpx.AsyncClient(transport=inbound_transport, base_url="http://mux.local") as client:
+    async with httpx.AsyncClient(transport=inbound_transport, base_url="http://localhost") as client:
         with patch(
             "mcp_router.server.httpx.AsyncClient",
             side_effect=_outbound_client_factory(upstream),
@@ -373,7 +373,7 @@ async def test_legacy_http_sse_baseline():
     upstream = MockMCPUpstream("legacy-http-sse")
     inbound_transport = httpx.ASGITransport(app=app)
 
-    async with httpx.AsyncClient(transport=inbound_transport, base_url="http://mux.local") as client:
+    async with httpx.AsyncClient(transport=inbound_transport, base_url="http://localhost") as client:
         with patch(
             "mcp_router.server.httpx.AsyncClient",
             side_effect=_outbound_client_factory(upstream),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import ipaddress
 import logging
 import os
 import re
@@ -14,6 +15,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SecretStr,
     TypeAdapter,
     field_validator,
     model_validator,
@@ -23,6 +25,36 @@ logger = logging.getLogger(__name__)
 ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 ROUTE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+HEADER_NAME_PATTERN = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+_FORBIDDEN_INBOUND_HEADERS = {
+    "authorization",
+    "cookie",
+    "proxy-authorization",
+    "host",
+    "content-length",
+    "connection",
+    "transfer-encoding",
+    "keep-alive",
+    "te",
+    "trailer",
+    "upgrade",
+    "forwarded",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+    "x-forwarded-user",
+    "x-real-ip",
+}
+_FORBIDDEN_UPSTREAM_INJECTED_HEADERS = {
+    "host",
+    "content-length",
+    "connection",
+    "transfer-encoding",
+    "keep-alive",
+    "te",
+    "trailer",
+    "upgrade",
+}
 
 
 def expand_env_vars(value: Any) -> Any:
@@ -46,8 +78,11 @@ def expand_env_vars(value: Any) -> Any:
 
 
 def load_router_config(config_path: str) -> RouterConfig:
-    with open(config_path, encoding="utf-8") as config_file:
-        data = yaml.safe_load(config_file) or {}
+    try:
+        with open(config_path, encoding="utf-8") as config_file:
+            data = yaml.safe_load(config_file) or {}
+    except yaml.YAMLError:
+        raise ValueError("Router configuration contains invalid YAML") from None
     return RouterConfig.model_validate(expand_env_vars(data))
 
 
@@ -76,24 +111,135 @@ def _validate_optional_text(value: str | None, field_name: str) -> str | None:
     return candidate
 
 
-def _validate_tool_list(value: list[str] | None) -> list[str] | None:
+def _validate_name_list(value: list[str] | None, label: str) -> list[str] | None:
     if value is None:
         return None
     cleaned: list[str] = []
     seen: set[str] = set()
-    for tool in value:
-        candidate = tool.strip()
+    for item in value:
+        candidate = item.strip()
         if not candidate:
-            raise ValueError("tool names must not be empty")
+            raise ValueError(f"{label} must not contain empty names")
         if candidate in seen:
-            raise ValueError(f"duplicate tool name: {candidate}")
+            raise ValueError(f"duplicate {label} name: {candidate}")
         seen.add(candidate)
         cleaned.append(candidate)
     return cleaned
 
 
+def _validate_header_name(value: str, field_name: str) -> str:
+    candidate = value.strip()
+    if not candidate or not HEADER_NAME_PATTERN.fullmatch(candidate):
+        raise ValueError(f"{field_name} contains an invalid HTTP header name")
+    return candidate
+
+
+class SecurityConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    mode: Literal["local_only", "authenticated"] = "local_only"
+    allowed_hosts: list[str] = Field(
+        default_factory=lambda: ["127.0.0.1", "localhost", "::1"],
+    )
+    allowed_origins: list[str] = Field(default_factory=list)
+    api_key: SecretStr | None = None
+    trusted_proxies: list[str] = Field(default_factory=list)
+    trusted_proxy_identity_header: str = "X-Forwarded-User"
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def validate_allowed_hosts(cls, value: list[str]) -> list[str]:
+        if not value:
+            raise ValueError("security.allowed_hosts must contain at least one host")
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for host in value:
+            candidate = host.strip().casefold()
+            if (
+                not candidate
+                or candidate == "*"
+                or "/" in candidate
+                or any(char.isspace() for char in candidate)
+            ):
+                raise ValueError("security.allowed_hosts must contain explicit host names or IP addresses")
+            if candidate not in seen:
+                seen.add(candidate)
+                cleaned.append(candidate)
+        return cleaned
+
+    @field_validator("allowed_origins")
+    @classmethod
+    def validate_allowed_origins(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for origin in value:
+            candidate = origin.strip()
+            if not candidate or candidate == "*":
+                raise ValueError("security.allowed_origins must contain explicit origins")
+            parsed = urlsplit(candidate)
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.netloc
+                or parsed.path not in {"", "/"}
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError("security.allowed_origins entries must be absolute HTTP origins")
+            normalized = f"{parsed.scheme.casefold()}://{parsed.netloc.casefold()}"
+            if normalized not in seen:
+                seen.add(normalized)
+                cleaned.append(normalized)
+        return cleaned
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        secret = value.get_secret_value().strip()
+        if not secret:
+            raise ValueError("security.api_key must not be empty")
+        return SecretStr(secret)
+
+    @field_validator("trusted_proxies")
+    @classmethod
+    def validate_trusted_proxies(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for network in value:
+            candidate = network.strip()
+            try:
+                normalized = str(ipaddress.ip_network(candidate, strict=False))
+            except ValueError as exc:
+                raise ValueError(f"invalid trusted proxy network: {candidate}") from exc
+            if normalized not in seen:
+                seen.add(normalized)
+                cleaned.append(normalized)
+        return cleaned
+
+    @field_validator("trusted_proxy_identity_header")
+    @classmethod
+    def validate_identity_header(cls, value: str) -> str:
+        return _validate_header_name(value, "security.trusted_proxy_identity_header")
+
+    @model_validator(mode="after")
+    def validate_authentication_provider(self) -> SecurityConfig:
+        if self.mode == "authenticated" and self.api_key is None and not self.trusted_proxies:
+            raise ValueError(
+                "security.mode='authenticated' requires api_key and/or trusted_proxies"
+            )
+        return self
+
+
+class RequestLimitConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    max_concurrent: int | None = Field(default=None, ge=1)
+    requests_per_minute: int | None = Field(default=None, ge=1)
+
+
 class EndpointBase(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     path: str
     url: str
@@ -102,9 +248,18 @@ class EndpointBase(BaseModel):
     upstream_timeout: float = Field(default=60.0, gt=0)
     transport: Literal["sse", "streamable-http"] | None = None
     legacy_sse_bridge: bool = False
+    allowed_methods: list[str] | None = None
+    denied_methods: list[str] | None = None
     allowed_tools: list[str] | None = None
     denied_tools: list[str] | None = None
+    allowed_resources: list[str] | None = None
+    denied_resources: list[str] | None = None
+    allowed_prompts: list[str] | None = None
+    denied_prompts: list[str] | None = None
+    inbound_headers: list[str] = Field(default_factory=list)
     headers: dict[str, str] | None = None
+    limits: RequestLimitConfig = Field(default_factory=RequestLimitConfig)
+    tool_limits: dict[str, RequestLimitConfig] = Field(default_factory=dict)
 
     @field_validator("path")
     @classmethod
@@ -133,10 +288,36 @@ class EndpointBase(BaseModel):
             raise ValueError("summary must not be empty")
         return summary
 
-    @field_validator("allowed_tools", "denied_tools")
+    @field_validator(
+        "allowed_methods",
+        "denied_methods",
+        "allowed_tools",
+        "denied_tools",
+        "allowed_resources",
+        "denied_resources",
+        "allowed_prompts",
+        "denied_prompts",
+    )
     @classmethod
-    def validate_tools(cls, value: list[str] | None) -> list[str] | None:
-        return _validate_tool_list(value)
+    def validate_policy_names(cls, value: list[str] | None) -> list[str] | None:
+        return _validate_name_list(value, "policy")
+
+    @field_validator("inbound_headers")
+    @classmethod
+    def normalize_inbound_headers(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for raw_name in value:
+            name = _validate_header_name(raw_name, "inbound_headers")
+            normalized = name.casefold()
+            if normalized in _FORBIDDEN_INBOUND_HEADERS or normalized.startswith("x-forwarded-"):
+                raise ValueError(
+                    f"inbound header '{name}' is reserved for gateway security or HTTP transport"
+                )
+            if normalized not in seen:
+                seen.add(normalized)
+                cleaned.append(name)
+        return cleaned
 
     @field_validator("headers")
     @classmethod
@@ -146,12 +327,12 @@ class EndpointBase(BaseModel):
         cleaned_headers: dict[str, str] = {}
         seen_names: set[str] = set()
         for key, raw_value in value.items():
-            header_name = key.strip()
-            if not header_name:
-                raise ValueError("header names must not be empty")
+            header_name = _validate_header_name(key, "headers")
             normalized_name = header_name.casefold()
             if normalized_name in seen_names:
                 raise ValueError(f"duplicate header name: {header_name}")
+            if normalized_name in _FORBIDDEN_UPSTREAM_INJECTED_HEADERS:
+                raise ValueError(f"upstream header '{header_name}' is controlled by HTTP transport")
             seen_names.add(normalized_name)
 
             normalized_value = raw_value.strip()
@@ -165,10 +346,32 @@ class EndpointBase(BaseModel):
                 cleaned_headers[header_name] = normalized_value
         return cleaned_headers or None
 
+    @field_validator("tool_limits")
+    @classmethod
+    def validate_tool_limits(
+        cls,
+        value: dict[str, RequestLimitConfig],
+    ) -> dict[str, RequestLimitConfig]:
+        cleaned: dict[str, RequestLimitConfig] = {}
+        for raw_name, limits in value.items():
+            name = raw_name.strip()
+            if not name:
+                raise ValueError("tool_limits keys must not be empty")
+            if name in cleaned:
+                raise ValueError(f"duplicate tool limit: {name}")
+            cleaned[name] = limits
+        return cleaned
+
     @model_validator(mode="after")
     def finalize_common_fields(self) -> EndpointBase:
-        if self.allowed_tools is not None and self.denied_tools is not None:
-            self.denied_tools = None
+        for allow_name, deny_name in (
+            ("allowed_methods", "denied_methods"),
+            ("allowed_tools", "denied_tools"),
+            ("allowed_resources", "denied_resources"),
+            ("allowed_prompts", "denied_prompts"),
+        ):
+            if getattr(self, allow_name) is not None and getattr(self, deny_name) is not None:
+                raise ValueError(f"{allow_name} and {deny_name} are mutually exclusive")
 
         if self.transport is None:
             parsed = urlsplit(self.url)
@@ -188,7 +391,7 @@ class RemoteEndpointConfig(EndpointBase):
 
 
 class ManagedReadinessConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     host: str | None = None
     port: int | None = Field(default=None, ge=1, le=65535)
@@ -202,6 +405,8 @@ class ManagedReadinessConfig(BaseModel):
 
 
 class ManagedEndpointConfig(EndpointBase):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
     mode: Literal["managed_cli"]
     argv: list[str] | None = None
     env: dict[str, str] = Field(default_factory=dict)
@@ -272,10 +477,11 @@ def EndpointConfig(**data: Any) -> Endpoint:
 
 
 class RouterConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     endpoints: list[Endpoint]
     max_request_body_bytes: int = Field(default=1_048_576, ge=1024, le=67_108_864)
+    security: SecurityConfig = Field(default_factory=SecurityConfig)
 
     @model_validator(mode="after")
     def validate_ports_and_paths(self) -> RouterConfig:
