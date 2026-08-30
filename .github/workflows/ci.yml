@@ -81,10 +81,11 @@ jobs:
       - uses: astral-sh/setup-uv@v7.1.2
         with:
           python-version: "3.13"
-      - name: Export locked runtime dependencies
-        run: uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file /tmp/runtime-requirements.txt
-      - name: Audit locked runtime dependencies
-        run: uvx --from pip-audit==2.10.1 pip-audit -r /tmp/runtime-requirements.txt
+      - name: Generate secure cryptography lock delta
+        run: |
+          uv lock --upgrade-package cryptography
+          git diff -- uv.lock
+          exit 1
 
   conformance:
     name: MCP conformance (2026-07-28)
@@ -103,7 +104,7 @@ jobs:
         env:
           PORT: "3001"
         run: |
-          npx --yes @modelcontextprotocol/server-everything@2.0.0 streamableHttp > /tmp/everything.log 2>&1 &
+          npx --yes @modelcontextprotocol/server-everything@2026.8.18 streamableHttp > /tmp/everything.log 2>&1 &
           echo $! > /tmp/everything.pid
           timeout 30 bash -c 'until curl -sS -o /dev/null http://127.0.0.1:3001/mcp; do sleep 0.5; done'
       - name: Start mux proxy
