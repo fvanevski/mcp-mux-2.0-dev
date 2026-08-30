@@ -569,7 +569,6 @@ class MCPRouter:
         timeout: float,
         principal: str,
     ) -> AsyncIterator[bytes]:
-        self.active_connections[path_prefix] = self.active_connections.get(path_prefix, 0) + 1
         client = await self._get_http_client()
         stream_context = client.stream(
             "GET",
@@ -582,8 +581,6 @@ class MCPRouter:
         try:
             response = await asyncio.wait_for(stream_context.__aenter__(), timeout=timeout)
             async for event in iter_sse_events(response.aiter_lines()):
-                self.last_activity[path_prefix] = time.time()
-
                 def transform(data: str) -> str:
                     rewritten = _rewrite_legacy_endpoint_data(data, path_prefix)
                     redacted = self._redactor.redact_known_secrets(rewritten)
@@ -601,11 +598,6 @@ class MCPRouter:
         finally:
             if response is not None:
                 await stream_context.__aexit__(None, None, None)
-            self.active_connections[path_prefix] = max(
-                0,
-                self.active_connections.get(path_prefix, 0) - 1,
-            )
-            self.last_activity[path_prefix] = time.time()
 
     async def local_sse_generator(
         self,
@@ -613,7 +605,7 @@ class MCPRouter:
         queue: asyncio.Queue[str],
         path_prefix: str,
     ) -> AsyncGenerator[bytes]:
-        self.active_connections[path_prefix] = self.active_connections.get(path_prefix, 0) + 1
+        runtime = self._runtimes.get(path_prefix)
         client_post_uri = f"/{path_prefix}?session_id={session_id}"
         yield f"event: endpoint\ndata: {client_post_uri}\n\n".encode()
         try:
@@ -622,11 +614,8 @@ class MCPRouter:
                 yield (line + "\n").encode("utf-8")
         finally:
             self.active_sessions.pop(session_id, None)
-            self.active_connections[path_prefix] = max(
-                0,
-                self.active_connections.get(path_prefix, 0) - 1,
-            )
-            self.last_activity[path_prefix] = time.time()
+            if runtime is not None:
+                runtime.legacy_session_ids.discard(session_id)
 
     async def _bridge_post(
         self,
