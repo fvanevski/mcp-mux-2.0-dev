@@ -788,30 +788,27 @@ async def test_sse_message_post_uses_upstream_message_path():
 async def test_streamable_http_direct_response_json():
     import httpx
     from starlette.requests import Request
-    # Configure endpoint with the legacy compatibility bridge explicitly enabled.
-    router._configs = {
-        "huggingface": EndpointConfig(
-            path="huggingface",
-            mode="remote",
-            url="https://huggingface.co/mcp",
-            summary="HuggingFace remote server",
-            transport="streamable-http",
-            legacy_sse_bridge=True,
-        )
-    }
-    router.active_sessions.clear()
 
-    # Create a local session queue to simulate active SSE connection
-    local_session_id = "local-session-123"
-    queue = asyncio.Queue()
-    router.active_sessions[local_session_id] = BridgeSession(path_prefix="huggingface", queue=queue)
+    endpoint = EndpointConfig(
+        path="huggingface",
+        mode="remote",
+        url="https://huggingface.co/mcp",
+        summary="HuggingFace remote server",
+        transport="streamable-http",
+        legacy_sse_bridge={},
+    )
+    router._configs = {"huggingface": endpoint}
+    router._legacy_bridge = None
+    bridge = router._get_legacy_bridge()
+    bridge_response = bridge.open_session(
+        endpoint=endpoint,
+        runtime=router._runtimes["huggingface"],
+    )
+    assert bridge_response.status_code == 200
+    session = next(iter(bridge.sessions.values()))
+    local_session_id = session.session_id
+    queue = session.queue
 
-    # 1. Test POST request for 'initialize'
-    # This should:
-    # - Call the remote server WITHOUT Mcp-Session-Id header (since it's not mapped yet)
-    # - Set Accept header to "application/json, text/event-stream"
-    # - Capture and map the remote session ID returned in response headers
-    # - Wrap direct JSON response into SSE message event on the queue
     mock_init_resp = MagicMock()
     mock_init_resp.status_code = 200
     mock_init_resp.headers = httpx.Headers({
@@ -819,7 +816,7 @@ async def test_streamable_http_direct_response_json():
         "mcp-session-id": "remote-session-456"
     })
     mock_init_resp.aread = AsyncMock(return_value=b'{"jsonrpc":"2.0","result":{"protocolVersion":"2024-11-05"},"id":1}')
-    
+
     mock_init_stream = MagicMock()
     mock_init_stream.__aenter__ = AsyncMock(return_value=mock_init_resp)
     mock_init_stream.__aexit__ = AsyncMock(return_value=None)
@@ -836,35 +833,22 @@ async def test_streamable_http_direct_response_json():
         response = await router.catch_all_proxy(mock_req_init)
         assert response.status_code == 202
         assert response.body == b"Accepted"
-        
-        # Verify call arguments
+
         mock_stream_call.assert_called_once()
         called_kwargs = mock_stream_call.call_args[1]
         assert "Mcp-Session-Id" not in called_kwargs["headers"]
         assert called_kwargs["headers"].get("accept") == "application/json, text/event-stream"
-        
-        # Verify remote session ID was mapped
-        assert router.active_sessions[local_session_id].remote_session_id == "remote-session-456"
-        
-        # Verify the wrapped SSE events in the queue
-        e1 = await queue.get()
-        e2 = await queue.get()
-        e3 = await queue.get()
-        assert e1 == "event: message"
-        assert e2 == 'data: {"jsonrpc":"2.0","result":{"protocolVersion":"2024-11-05"},"id":1}'
-        assert e3 == ""
+        assert bridge.sessions[local_session_id].remote_session_id == "remote-session-456"
+
+        event = await queue.get()
+        assert event == b'event: message\ndata: {"jsonrpc":"2.0","result":{"protocolVersion":"2024-11-05"},"id":1}\n\n'
         assert queue.empty()
 
-    # 2. Test subsequent POST request for 'tools/list'
-    # This should:
-    # - Call the remote server WITH Mcp-Session-Id header (using the mapped session ID)
-    # - Set Accept header to "application/json, text/event-stream"
-    # - Wrap direct JSON response into SSE message event on the queue
     mock_tools_resp = MagicMock()
     mock_tools_resp.status_code = 200
     mock_tools_resp.headers = httpx.Headers({"content-type": "application/json"})
     mock_tools_resp.aread = AsyncMock(return_value=b'{"jsonrpc":"2.0","result":{"tools":[]},"id":2}')
-    
+
     mock_tools_stream = MagicMock()
     mock_tools_stream.__aenter__ = AsyncMock(return_value=mock_tools_resp)
     mock_tools_stream.__aexit__ = AsyncMock(return_value=None)
@@ -881,59 +865,56 @@ async def test_streamable_http_direct_response_json():
         response2 = await router.catch_all_proxy(mock_req_tools)
         assert response2.status_code == 202
         assert response2.body == b"Accepted"
-        
-        # Verify call arguments
+
         mock_stream_call2.assert_called_once()
         called_kwargs2 = mock_stream_call2.call_args[1]
         assert called_kwargs2["headers"].get("Mcp-Session-Id") == "remote-session-456"
         assert called_kwargs2["headers"].get("accept") == "application/json, text/event-stream"
-        
-        # Verify the wrapped SSE events in the queue
-        e4 = await queue.get()
-        e5 = await queue.get()
-        e6 = await queue.get()
-        assert e4 == "event: message"
-        assert e5 == 'data: {"jsonrpc":"2.0","result":{"tools":[]},"id":2}'
-        assert e6 == ""
+
+        event2 = await queue.get()
+        assert event2 == b'event: message\ndata: {"jsonrpc":"2.0","result":{"tools":[]},"id":2}\n\n'
         assert queue.empty()
+
+    await bridge.close_all()
 
 
 @pytest.mark.asyncio
 async def test_streamable_http_rejects_session_for_different_endpoint():
     from starlette.requests import Request
 
-    router._configs = {
-        "weather": EndpointConfig(
-            path="weather",
-            mode="remote",
-            url="http://api.weather.com/mcp",
-            summary="Weather summary",
-            transport="streamable-http",
-            legacy_sse_bridge=True,
-        ),
-        "huggingface": EndpointConfig(
-            path="huggingface",
-            mode="remote",
-            url="https://huggingface.co/mcp",
-            summary="HuggingFace remote server",
-            transport="streamable-http",
-            legacy_sse_bridge=True,
-        )
-    }
-    router.active_sessions.clear()
-    local_session_id = "weather-session"
-    router.active_sessions[local_session_id] = BridgeSession(
-        path_prefix="weather",
-        queue=asyncio.Queue(),
-        remote_session_id="remote-weather-session"
+    weather = EndpointConfig(
+        path="weather",
+        mode="remote",
+        url="http://api.weather.com/mcp",
+        summary="Weather summary",
+        transport="streamable-http",
+        legacy_sse_bridge={},
     )
+    huggingface = EndpointConfig(
+        path="huggingface",
+        mode="remote",
+        url="https://huggingface.co/mcp",
+        summary="HuggingFace remote server",
+        transport="streamable-http",
+        legacy_sse_bridge={},
+    )
+    router._configs = {"weather": weather, "huggingface": huggingface}
+    router._legacy_bridge = None
+    bridge = router._get_legacy_bridge()
+    bridge_response = bridge.open_session(
+        endpoint=weather,
+        runtime=router._runtimes["weather"],
+    )
+    assert bridge_response.status_code == 200
+    session = next(iter(bridge.sessions.values()))
+    session.remote_session_id = "remote-weather-session"
 
     mock_req = MagicMock(spec=Request)
     mock_req.method = "POST"
     mock_req.path_params = {"path_prefix": "huggingface"}
     mock_req.url.path = "/huggingface"
     mock_req.headers = {"accept": "application/json", "content-type": "application/json"}
-    mock_req.query_params = {"session_id": local_session_id}
+    mock_req.query_params = {"session_id": session.session_id}
     mock_req.body = AsyncMock(return_value=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
 
     with patch("httpx.AsyncClient.stream") as mock_stream:
@@ -942,49 +923,53 @@ async def test_streamable_http_rejects_session_for_different_endpoint():
     assert response.status_code == 409
     assert b"different endpoint" in response.body
     mock_stream.assert_not_called()
+    await bridge.close_all()
 
 
 @pytest.mark.asyncio
 async def test_apply_configuration_drops_sessions_for_removed_or_changed_endpoint():
-    router._configs = {
+    endpoints = {
         "weather": EndpointConfig(
             path="weather",
             mode="remote",
             url="http://api.weather.com/mcp",
             summary="Weather summary",
-            transport="streamable-http"
+            transport="streamable-http",
+            legacy_sse_bridge={},
         ),
         "huggingface": EndpointConfig(
             path="huggingface",
             mode="remote",
             url="https://huggingface.co/mcp",
             summary="HuggingFace remote server",
-            transport="streamable-http"
+            transport="streamable-http",
+            legacy_sse_bridge={},
         ),
         "files": EndpointConfig(
             path="files",
             mode="remote",
             url="http://files.example.com/mcp",
             summary="Files remote server",
-            transport="streamable-http"
-        )
+            transport="streamable-http",
+            legacy_sse_bridge={},
+        ),
     }
-    router.active_sessions.clear()
-    router.active_sessions["weather-session"] = BridgeSession(
-        path_prefix="weather",
-        queue=asyncio.Queue(),
-        remote_session_id="remote-weather-session"
-    )
-    router.active_sessions["hf-session"] = BridgeSession(
-        path_prefix="huggingface",
-        queue=asyncio.Queue(),
-        remote_session_id="remote-hf-session"
-    )
-    router.active_sessions["files-session"] = BridgeSession(
-        path_prefix="files",
-        queue=asyncio.Queue(),
-        remote_session_id="remote-files-session"
-    )
+    router._configs = endpoints
+    router._legacy_bridge = None
+    bridge = router._get_legacy_bridge()
+    session_ids: dict[str, str] = {}
+    for path, endpoint in endpoints.items():
+        bridge_response = bridge.open_session(
+            endpoint=endpoint,
+            runtime=router._runtimes[path],
+        )
+        assert bridge_response.status_code == 200
+        session = next(
+            session
+            for session in bridge.sessions.values()
+            if session.path_prefix == path
+        )
+        session_ids[path] = session.session_id
 
     new_config = RouterConfig.model_validate({
         "endpoints": [
@@ -992,19 +977,22 @@ async def test_apply_configuration_drops_sessions_for_removed_or_changed_endpoin
                 "path": "weather",
                 "mode": "remote",
                 "url": "http://api.weather.com/v2/mcp",
-                "summary": "Updated weather summary"
+                "summary": "Updated weather summary",
+                "legacy_sse_bridge": {},
             },
             {
                 "path": "huggingface",
                 "mode": "remote",
                 "url": "https://huggingface.co/mcp",
-                "summary": "HuggingFace remote server"
+                "summary": "HuggingFace remote server",
+                "legacy_sse_bridge": {},
             }
         ]
     })
 
     await router.apply_configuration(new_config)
 
-    assert "weather-session" not in router.active_sessions
-    assert "files-session" not in router.active_sessions
-    assert "hf-session" in router.active_sessions
+    assert session_ids["weather"] not in bridge.sessions
+    assert session_ids["files"] not in bridge.sessions
+    assert session_ids["huggingface"] in bridge.sessions
+    await bridge.close_all()
