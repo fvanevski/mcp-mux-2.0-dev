@@ -1043,6 +1043,14 @@ class MCPRouter:
                     limit_lease,
                 )
             if endpoint.legacy_sse_bridge:
+                # Local compatibility SSE does not acquire an upstream lease, so
+                # retirement admission must be checked explicitly. There is no
+                # await between this state check and session publication.
+                if runtime.state is RuntimeState.DRAINING:
+                    return await self._finish_leased_response(
+                        JSONResponse({"error": "Endpoint runtime is draining"}, status_code=503),
+                        limit_lease,
+                    )
                 session_id = uuid4().hex
                 queue: asyncio.Queue[str] = asyncio.Queue()
                 self.active_sessions[session_id] = BridgeSession(
@@ -1062,6 +1070,27 @@ class MCPRouter:
                     ),
                     limit_lease,
                 )
+
+        session_id = request.query_params.get("session_id")
+        if (
+            request.method == "POST"
+            and endpoint.transport == "streamable-http"
+            and session_id
+            and request_era is ProtocolEra.LEGACY
+            and not endpoint.legacy_sse_bridge
+        ):
+            stale_session = self.active_sessions.get(session_id)
+            if stale_session is not None and stale_session.path_prefix == path_prefix:
+                self.active_sessions.pop(session_id, None)
+                runtime.legacy_session_ids.discard(session_id)
+            return await self._finish_leased_response(
+                _transport_error_response(
+                    400,
+                    "Legacy bridge sessions are disabled for this endpoint",
+                    request_id=None if parsed_request is None else parsed_request.request_id,
+                ),
+                limit_lease,
+            )
 
         runtime_lease, activation_error = await self._acquire_upstream_lease(runtime)
         if activation_error is not None:
@@ -1090,10 +1119,10 @@ class MCPRouter:
                 runtime_lease,
             )
 
-        session_id = request.query_params.get("session_id")
         if (
             request.method == "POST"
             and endpoint.transport == "streamable-http"
+            and endpoint.legacy_sse_bridge
             and session_id
             and request_era is ProtocolEra.LEGACY
         ):

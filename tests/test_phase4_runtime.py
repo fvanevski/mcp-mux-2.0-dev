@@ -20,7 +20,7 @@ from starlette.responses import Response, StreamingResponse
 from mcp_router.core.config_loader import ManagedEndpointConfig, RouterConfig
 from mcp_router.core.process_manager import ProcessManager
 from mcp_router.core.runtime import EndpointRuntime, RuntimeState
-from mcp_router.server import MCPRouter
+from mcp_router.server import BridgeSession, MCPRouter
 
 
 def _find_unused_loopback_port() -> int:
@@ -61,6 +61,44 @@ def managed_config(
     endpoint = RouterConfig.model_validate({"endpoints": [data]}).endpoints[0]
     assert isinstance(endpoint, ManagedEndpointConfig)
     return endpoint
+
+
+def _proxy_request(
+    method: str,
+    path_prefix: str,
+    *,
+    headers: dict[str, str] | None = None,
+    query_string: bytes = b"",
+    body: bytes = b"",
+) -> Request:
+    sent = False
+
+    async def receive() -> dict[str, object]:
+        nonlocal sent
+        if sent:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    encoded_headers = [
+        (name.casefold().encode("latin-1"), value.encode("latin-1"))
+        for name, value in (headers or {}).items()
+    ]
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": method,
+        "scheme": "http",
+        "path": f"/{path_prefix}",
+        "raw_path": f"/{path_prefix}".encode(),
+        "root_path": "",
+        "query_string": query_string,
+        "headers": encoded_headers,
+        "server": ("testserver", 80),
+        "client": ("127.0.0.1", 12345),
+        "path_params": {"path_prefix": path_prefix},
+    }
+    return Request(scope, receive)
 
 
 def test_managed_target_defaults_to_loopback_only() -> None:
@@ -277,6 +315,153 @@ async def test_multi_endpoint_reload_keeps_retired_runtime_unavailable_until_pub
 
     assert router._runtimes["alpha"] is not alpha_runtime
     assert router._runtimes["alpha"].config.url == "http://localhost:4040/mcp"
+
+
+@pytest.mark.asyncio
+async def test_retired_runtime_rejects_legacy_session_after_cleanup_before_publication() -> None:
+    router = MCPRouter(Starlette(), "unused")
+    old_alpha = managed_config(
+        path="alpha",
+        url="http://localhost:3033/mcp",
+        legacy_sse_bridge=True,
+    )
+    old_beta = managed_config(path="beta", url="http://localhost:3034/mcp")
+    router._configs = {"alpha": old_alpha, "beta": old_beta}
+    alpha_runtime = router._runtimes["alpha"]
+    beta_runtime = router._runtimes["beta"]
+
+    old_session_id = "alpha-before-retirement"
+    router.active_sessions[old_session_id] = BridgeSession(
+        path_prefix="alpha",
+        queue=asyncio.Queue(),
+    )
+    alpha_runtime.legacy_session_ids.add(old_session_id)
+
+    beta_drain_waiting = asyncio.Event()
+    allow_beta_drain = asyncio.Event()
+
+    async def blocked_beta_wait_for_leases() -> None:
+        beta_drain_waiting.set()
+        await allow_beta_drain.wait()
+
+    replacement = RouterConfig.model_validate(
+        {
+            "endpoints": [
+                {
+                    "path": "alpha",
+                    "mode": "managed_cli",
+                    "argv": ["example-mcp", "--serve"],
+                    "url": "http://localhost:4040/mcp",
+                    "summary": "Alpha replacement",
+                    "legacy_sse_bridge": True,
+                },
+                {
+                    "path": "beta",
+                    "mode": "managed_cli",
+                    "argv": ["example-mcp", "--serve"],
+                    "url": "http://localhost:4041/mcp",
+                    "summary": "Beta replacement",
+                },
+            ]
+        }
+    )
+
+    with patch.object(
+        beta_runtime,
+        "wait_for_leases",
+        new_callable=AsyncMock,
+        side_effect=blocked_beta_wait_for_leases,
+    ) as beta_wait:
+        reload_task = asyncio.create_task(router.apply_configuration(replacement))
+        await beta_drain_waiting.wait()
+
+        assert alpha_runtime.state is RuntimeState.DRAINING
+        assert old_session_id not in router.active_sessions
+        assert old_session_id not in alpha_runtime.legacy_session_ids
+        assert router._runtimes["alpha"] is alpha_runtime
+        assert not reload_task.done()
+
+        response = await router.catch_all_proxy(
+            _proxy_request(
+                "GET",
+                "alpha",
+                headers={"accept": "text/event-stream"},
+            )
+        )
+
+        assert response.status_code == 503
+        assert router.active_sessions == {}
+        assert alpha_runtime.legacy_session_ids == set()
+        assert not reload_task.done()
+
+        allow_beta_drain.set()
+        await reload_task
+
+    beta_wait.assert_awaited_once_with()
+    assert router._runtimes["alpha"] is not alpha_runtime
+    assert router._runtimes["alpha"].config.url == "http://localhost:4040/mcp"
+
+
+@pytest.mark.asyncio
+async def test_disabling_legacy_bridge_drops_session_and_rejects_stale_session_post() -> None:
+    router = MCPRouter(Starlette(), "unused")
+    old_config = managed_config(legacy_sse_bridge=True)
+    router._configs = {"managed": old_config}
+    old_runtime = router._runtimes["managed"]
+    session_id = "legacy-before-disable"
+    stale_session = BridgeSession(path_prefix="managed", queue=asyncio.Queue())
+    router.active_sessions[session_id] = stale_session
+    old_runtime.legacy_session_ids.add(session_id)
+
+    replacement = RouterConfig.model_validate(
+        {
+            "endpoints": [
+                {
+                    "path": "managed",
+                    "mode": "managed_cli",
+                    "argv": ["example-mcp", "--serve"],
+                    "url": "http://localhost:3033/mcp",
+                    "summary": "Bridge disabled replacement",
+                    "legacy_sse_bridge": False,
+                }
+            ]
+        }
+    )
+    await router.apply_configuration(replacement)
+
+    replacement_runtime = router._runtimes["managed"]
+    assert replacement_runtime is not old_runtime
+    assert replacement_runtime.config.legacy_sse_bridge is False
+    assert session_id not in router.active_sessions
+    assert session_id not in old_runtime.legacy_session_ids
+
+    # Defense in depth: even if stale same-endpoint session state is reintroduced,
+    # the replacement configuration remains authoritative and the bridge is unusable.
+    router.active_sessions[session_id] = stale_session
+    replacement_runtime.legacy_session_ids.add(session_id)
+    request = _proxy_request(
+        "POST",
+        "managed",
+        headers={"content-type": "application/json"},
+        query_string=f"session_id={session_id}".encode(),
+        body=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+    )
+
+    with (
+        patch.object(
+            router.process_manager,
+            "start_managed_server",
+            new_callable=AsyncMock,
+        ) as start_managed,
+        patch.object(router, "_bridge_post", new_callable=AsyncMock) as bridge_post,
+    ):
+        response = await router.catch_all_proxy(request)
+
+    assert response.status_code == 400
+    start_managed.assert_not_awaited()
+    bridge_post.assert_not_awaited()
+    assert session_id not in router.active_sessions
+    assert session_id not in replacement_runtime.legacy_session_ids
 
 
 @pytest.mark.asyncio
