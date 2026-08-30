@@ -4,6 +4,45 @@
 
 At router scope, `max_request_body_bytes` bounds JSON-RPC POST bodies before they can be forwarded. It defaults to 1 MiB (`1048576`) and accepts values from 1 KiB through 64 MiB. The limit applies after any declared `Content-Length` precheck and again while the actual request body is streamed.
 
+## Gateway security
+
+The default security mode is `local_only`. The shipped configuration makes that default explicit:
+
+```yaml
+security:
+  mode: local_only
+  allowed_hosts: [127.0.0.1, localhost, "::1"]
+  allowed_origins: []
+```
+
+`local_only` requires a loopback immediate peer, validates the `Host` header against `allowed_hosts`, and rejects every present `Origin` that is not explicitly listed. The command-line launcher also refuses a non-loopback `--host` while this mode is active. There is no wildcard credentialed CORS path.
+
+Non-local binding requires `security.mode: authenticated` and at least one explicit authentication provider. Direct callers may authenticate with a gateway API key supplied as `Authorization: Bearer <key>`:
+
+```yaml
+security:
+  mode: authenticated
+  allowed_hosts: [mcp.example.test]
+  allowed_origins: [https://agent.example.test]
+  api_key: "${MCP_MUX_API_KEY}"
+```
+
+The gateway consumes that `Authorization` value locally and never forwards it to the MCP upstream. Endpoint `headers` remain the separate source for credentials injected toward the upstream.
+
+A trusted reverse proxy may instead assert an identity header, but only when the immediate network peer is inside an explicitly configured IP/CIDR range:
+
+```yaml
+security:
+  mode: authenticated
+  allowed_hosts: [mcp.example.test]
+  trusted_proxies: [127.0.0.1/32]
+  trusted_proxy_identity_header: X-Forwarded-User
+```
+
+The reverse proxy must terminate external authentication, overwrite the configured identity header rather than append to caller input, and connect to the mux from the configured trusted address. Forwarded identity from any other peer is ignored. Do not configure an Internet-facing proxy address range more broadly than necessary.
+
+Browser origins remain exact allowlist entries even in authenticated mode. A valid preflight receives an exact `Access-Control-Allow-Origin`; the router never emits `*` together with credentials.
+
 ## Common endpoint fields
 
 Every endpoint requires:
@@ -13,9 +52,41 @@ Every endpoint requires:
 - `url`: an absolute `http` or `https` URL.
 - `summary`: a non-empty operator-facing description.
 
-Optional common fields are `timeout`, `upstream_timeout`, `transport`, `legacy_sse_bridge`, `headers`, `allowed_tools`, and `denied_tools`. `timeout` is the existing managed-endpoint inactivity timeout. `upstream_timeout` defaults to 60 seconds and bounds upstream request establishment plus finite response consumption: connect/write/pool operations remain bounded, response headers must arrive within the configured budget, complete JSON responses must finish within that budget, and non-SSE streamed responses retain a per-chunk idle bound. Event-stream responses deliberately have no read-idle timeout because both modern Streamable HTTP and explicit legacy HTTP+SSE may remain valid while quiet; downstream cancellation still closes the corresponding upstream response context. Both configuration values must be positive. `transport`, when explicit, is `sse` or `streamable-http`; otherwise it is inferred from the URL. `legacy_sse_bridge` is valid only for `streamable-http` endpoints. Tool names must be non-empty and unique within their list. If both allow and deny lists are present, the allowlist continues to take precedence.
+Optional common fields are `timeout`, `upstream_timeout`, `transport`, `legacy_sse_bridge`, `headers`, `inbound_headers`, capability-policy lists, `limits`, and `tool_limits`. `timeout` is the existing managed-endpoint inactivity timeout. `upstream_timeout` defaults to 60 seconds and bounds upstream request establishment plus finite response consumption: connect/write/pool operations remain bounded, response headers must arrive within the configured budget, complete JSON responses must finish within that budget, and non-SSE streamed responses retain a per-chunk idle bound. Event-stream responses deliberately have no read-idle timeout because both modern Streamable HTTP and explicit legacy HTTP+SSE may remain valid while quiet; downstream cancellation still closes the corresponding upstream response context. Both configuration values must be positive. `transport`, when explicit, is `sse` or `streamable-http`; otherwise it is inferred from the URL. `legacy_sse_bridge` is valid only for `streamable-http` endpoints.
+
+Capability policy supports mutually exclusive allow/deny pairs for methods, tools, resources, and prompts: `allowed_methods`/`denied_methods`, `allowed_tools`/`denied_tools`, `allowed_resources`/`denied_resources`, and `allowed_prompts`/`denied_prompts`. Names must be non-empty and unique. Supplying both halves of any pair is a configuration error; the loader no longer silently discards a denylist. The same policy evaluator authorizes direct calls and projects discovery results, so a capability omitted from discovery cannot still be invoked by name. Modern requests reach policy only after Phase-2 header/body validation; supported legacy requests use the parsed JSON-RPC body as the policy source.
 
 Configuration models reject unknown fields. Environment references are expanded before model validation using `${NAME}` for required values or `${NAME:-fallback}` for a default.
+
+### Caller headers versus upstream headers
+
+Inbound caller headers are deny-by-default. MCP transport headers needed for protocol operation (`Content-Type`, `Accept`, MCP routing/session headers, `Mcp-Param-*`, and trace context) are forwarded automatically. An endpoint may opt additional non-security headers in with `inbound_headers`:
+
+```yaml
+inbound_headers: [X-Tenant-Hint]
+headers:
+  Authorization: "Bearer ${UPSTREAM_TOKEN}"
+```
+
+`Authorization`, `Cookie`, `Proxy-Authorization`, Host/hop-by-hop headers, and forwarded-identity headers cannot be added to `inbound_headers`. The caller's credentials are stripped before upstream dispatch; configured `headers` are applied afterward as the upstream credential/header source. The configured trusted-proxy identity header is also removed before forwarding.
+
+Normal logs redact configured API keys, credential-bearing upstream header values, and secret-like managed-process environment values. Upstream text/JSON/SSE responses are redacted against the same known secret set before being returned. Policy- or redaction-transformed responses drop stale representation/cache validators such as `Content-Length`, `Content-Encoding`, `ETag`, and digest metadata and are marked non-cacheable where applicable. The mux currently implements no cross-request discovery cache; any future cache must partition by endpoint, principal/authorization scope, policy identity, and protocol revision.
+
+### Endpoint and tool limits
+
+Per-endpoint limits are optional and in-process:
+
+```yaml
+limits:
+  max_concurrent: 32
+  requests_per_minute: 600
+tool_limits:
+  expensive_tool:
+    max_concurrent: 2
+    requests_per_minute: 30
+```
+
+An exceeded limit is rejected locally before managed-process activation or upstream dispatch. Streaming responses hold their endpoint concurrency lease until the downstream stream closes. Rate windows are one minute and are scoped independently per endpoint and configured tool.
 
 ## Remote endpoint
 
@@ -81,6 +152,8 @@ Legacy managed configuration used an opaque `command` string and optionally sepa
 Initial configuration is loaded, environment-expanded, and fully validated before the watcher or idle-timeout runtime tasks are started. Invalid initial configuration therefore prevents application startup.
 
 Hot reload is last-known-good: a changed file is parsed and validated before the router callback is invoked. If parsing, environment expansion, or validation fails, the candidate configuration is logged and rejected and the active configuration remains unchanged. A subsequent file change is evaluated normally.
+
+Security, policy, inbound-header, upstream-header, timeout, and request-limit changes are applied in place. They do not restart an otherwise unchanged managed process or discard a compatibility session. Changes that alter the endpoint target, transport/bridge mode, managed argv/environment/working directory, readiness settings, or unsafe shell command remain runtime-affecting and cause the existing runtime/session state for that endpoint to be reset.
 
 ## Dependency authority
 
