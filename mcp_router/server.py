@@ -622,6 +622,7 @@ class MCPRouter:
         *,
         request: Request,
         endpoint: Endpoint,
+        runtime: EndpointRuntime,
         path_prefix: str,
         target_url: str,
         forward_headers: dict[str, str],
@@ -742,7 +743,11 @@ class MCPRouter:
                     if on_complete is not None:
                         await on_complete()
 
-        asyncio.create_task(process_response())
+        response_task = asyncio.create_task(
+            process_response(),
+            name=f"mcp-mux:{path_prefix}:legacy-response",
+        )
+        runtime.track_legacy_task(response_task)
         return Response("Accepted", status_code=202)
 
     async def _proxy_request(
