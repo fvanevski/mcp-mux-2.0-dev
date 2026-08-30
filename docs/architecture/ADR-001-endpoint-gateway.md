@@ -5,6 +5,8 @@
 - **Phase:** Issue #3 — compatibility contract and architecture baseline
 - **Frozen implementation base:** `0d630e7aab347657c7aca108451a0a6850793edb`
 
+> **Post-baseline status (Phase 5 / Issue #8):** the historical “Current architecture from source” sections below remain a record of the frozen Phase 0 base. Current configuration now accepts only `remote` and `managed_cli`; `stdio_bridge` is rejected. The mux-local SSE bridge is a deprecated, explicitly configured, bounded compatibility adapter isolated from canonical modern Streamable HTTP. See `docs/configuration.md` and `docs/compatibility-matrix.md` for the current contract.
+
 ## Context
 
 `mcp-mux` is currently an ASGI reverse proxy and managed-process orchestrator. Its public namespace is not an MCP tool namespace: each configured endpoint owns a distinct HTTP path such as `/firecrawl`, `/huggingface`, or `/context7`, and traffic under that path is forwarded to exactly one configured upstream.

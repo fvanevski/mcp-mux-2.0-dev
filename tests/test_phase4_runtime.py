@@ -25,7 +25,7 @@ from mcp_router.core.config_loader import (
 from mcp_router.core.policy import CapabilityPolicy
 from mcp_router.core.process_manager import ProcessManager
 from mcp_router.core.runtime import EndpointRuntime, RuntimeState
-from mcp_router.server import BridgeSession, MCPRouter
+from mcp_router.server import MCPRouter
 
 
 def _find_unused_loopback_port() -> int:
@@ -52,13 +52,14 @@ def managed_config(
         "url": url,
         "summary": "Managed fixture",
         "timeout": 30,
-        "legacy_sse_bridge": legacy_sse_bridge,
         "readiness": {
             "timeout": readiness_timeout,
             "interval": readiness_interval,
             "legacy_initialize_fallback": legacy_fallback,
         },
     }
+    if legacy_sse_bridge:
+        data["legacy_sse_bridge"] = {}
     if headers is not None:
         data["headers"] = headers
     if restart is not None:
@@ -424,12 +425,10 @@ async def test_retired_runtime_rejects_legacy_session_after_cleanup_before_publi
     alpha_runtime = router._runtimes["alpha"]
     beta_runtime = router._runtimes["beta"]
 
-    old_session_id = "alpha-before-retirement"
-    router.active_sessions[old_session_id] = BridgeSession(
-        path_prefix="alpha",
-        queue=asyncio.Queue(),
-    )
-    alpha_runtime.legacy_session_ids.add(old_session_id)
+    bridge = router._get_legacy_bridge()
+    bridge_response = bridge.open_session(endpoint=old_alpha, runtime=alpha_runtime)
+    assert isinstance(bridge_response, StreamingResponse)
+    old_session_id = next(iter(bridge.sessions))
 
     beta_drain_waiting = asyncio.Event()
     allow_beta_drain = asyncio.Event()
@@ -447,7 +446,7 @@ async def test_retired_runtime_rejects_legacy_session_after_cleanup_before_publi
                     "argv": ["example-mcp", "--serve"],
                     "url": "http://localhost:4040/mcp",
                     "summary": "Alpha replacement",
-                    "legacy_sse_bridge": True,
+                    "legacy_sse_bridge": {},
                 },
                 {
                     "path": "beta",
@@ -470,7 +469,7 @@ async def test_retired_runtime_rejects_legacy_session_after_cleanup_before_publi
         await beta_drain_waiting.wait()
 
         assert alpha_runtime.state is RuntimeState.DRAINING
-        assert old_session_id not in router.active_sessions
+        assert old_session_id not in bridge.sessions
         assert old_session_id not in alpha_runtime.legacy_session_ids
         assert router._runtimes["alpha"] is alpha_runtime
         assert not reload_task.done()
@@ -484,7 +483,7 @@ async def test_retired_runtime_rejects_legacy_session_after_cleanup_before_publi
         )
 
         assert response.status_code == 503
-        assert router.active_sessions == {}
+        assert not bridge.sessions
         assert alpha_runtime.legacy_session_ids == set()
         assert not reload_task.done()
 
@@ -502,10 +501,10 @@ async def test_disabling_legacy_bridge_drops_session_and_rejects_stale_session_p
     old_config = managed_config(legacy_sse_bridge=True)
     router._configs = {"managed": old_config}
     old_runtime = router._runtimes["managed"]
-    session_id = "legacy-before-disable"
-    stale_session = BridgeSession(path_prefix="managed", queue=asyncio.Queue())
-    router.active_sessions[session_id] = stale_session
-    old_runtime.legacy_session_ids.add(session_id)
+    bridge = router._get_legacy_bridge()
+    bridge_response = bridge.open_session(endpoint=old_config, runtime=old_runtime)
+    assert isinstance(bridge_response, StreamingResponse)
+    session_id = next(iter(bridge.sessions))
 
     replacement = RouterConfig.model_validate(
         {
@@ -516,7 +515,6 @@ async def test_disabling_legacy_bridge_drops_session_and_rejects_stale_session_p
                     "argv": ["example-mcp", "--serve"],
                     "url": "http://localhost:3033/mcp",
                     "summary": "Bridge disabled replacement",
-                    "legacy_sse_bridge": False,
                 }
             ]
         }
@@ -525,14 +523,10 @@ async def test_disabling_legacy_bridge_drops_session_and_rejects_stale_session_p
 
     replacement_runtime = router._runtimes["managed"]
     assert replacement_runtime is not old_runtime
-    assert replacement_runtime.config.legacy_sse_bridge is False
-    assert session_id not in router.active_sessions
+    assert replacement_runtime.config.legacy_sse_bridge is None
+    assert session_id not in bridge.sessions
     assert session_id not in old_runtime.legacy_session_ids
 
-    # Defense in depth: even if stale same-endpoint session state is reintroduced,
-    # the replacement configuration remains authoritative and the bridge is unusable.
-    router.active_sessions[session_id] = stale_session
-    replacement_runtime.legacy_session_ids.add(session_id)
     request = _proxy_request(
         "POST",
         "managed",
@@ -547,15 +541,15 @@ async def test_disabling_legacy_bridge_drops_session_and_rejects_stale_session_p
             "start_managed_server",
             new_callable=AsyncMock,
         ) as start_managed,
-        patch.object(router, "_bridge_post", new_callable=AsyncMock) as bridge_post,
+        patch.object(bridge, "handle_post", new_callable=AsyncMock) as bridge_post,
     ):
         response = await router.catch_all_proxy(request)
 
     assert response.status_code == 400
     start_managed.assert_not_awaited()
     bridge_post.assert_not_awaited()
-    assert session_id not in router.active_sessions
-    assert session_id not in replacement_runtime.legacy_session_ids
+    assert session_id not in bridge.sessions
+    assert replacement_runtime.legacy_session_ids == set()
 
 
 @pytest.mark.asyncio
@@ -570,7 +564,7 @@ async def test_cancelled_bridge_setup_releases_runtime_and_limit_leases() -> Non
                     "argv": ["example-mcp", "--serve"],
                     "url": "http://localhost:3033/mcp",
                     "summary": "Managed bridge cancellation fixture",
-                    "legacy_sse_bridge": True,
+                    "legacy_sse_bridge": {},
                     "limits": {"max_concurrent": 1},
                 }
             ]
@@ -582,12 +576,10 @@ async def test_cancelled_bridge_setup_releases_runtime_and_limit_leases() -> Non
     runtime.state = RuntimeState.RUNNING
     runtime.process = MagicMock(returncode=None)
 
-    session_id = "bridge-cancellation"
-    router.active_sessions[session_id] = BridgeSession(
-        path_prefix="managed",
-        queue=asyncio.Queue(),
-    )
-    runtime.legacy_session_ids.add(session_id)
+    bridge = router._get_legacy_bridge()
+    bridge_response = bridge.open_session(endpoint=endpoint, runtime=runtime)
+    assert isinstance(bridge_response, StreamingResponse)
+    session_id = next(iter(bridge.sessions))
 
     setup_started = asyncio.Event()
     hold_setup = asyncio.Event()
@@ -602,6 +594,7 @@ async def test_cancelled_bridge_setup_releases_runtime_and_limit_leases() -> Non
     stream_context.__aexit__ = AsyncMock(return_value=None)
     client = MagicMock()
     client.stream = MagicMock(return_value=stream_context)
+    bridge._client_provider = AsyncMock(return_value=client)
 
     request = _proxy_request(
         "POST",
@@ -611,33 +604,29 @@ async def test_cancelled_bridge_setup_releases_runtime_and_limit_leases() -> Non
         body=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
     )
 
-    with patch.object(
-        router,
-        "_get_http_client",
-        new_callable=AsyncMock,
-        return_value=client,
-    ):
-        request_task = asyncio.create_task(router.catch_all_proxy(request))
-        await setup_started.wait()
+    request_task = asyncio.create_task(router.catch_all_proxy(request))
+    await setup_started.wait()
 
-        assert runtime.active_leases == 1
-        held_lease, held_rejection = await router._limiter.acquire(endpoint)
-        assert held_lease is None
-        assert held_rejection is not None
+    assert runtime.active_leases == 1
+    held_lease, held_rejection = await router._limiter.acquire(endpoint)
+    assert held_lease is None
+    assert held_rejection is not None
 
-        request_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await request_task
+    request_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request_task
 
     assert runtime.active_leases == 0
     await asyncio.wait_for(runtime.wait_for_leases(), timeout=0.1)
-    assert runtime.legacy_tasks == set()
     stream_context.__aexit__.assert_not_awaited()
 
     recovered_lease, recovered_rejection = await router._limiter.acquire(endpoint)
     assert recovered_rejection is None
     assert recovered_lease is not None
     await recovered_lease.release()
+
+    await bridge.close_all()
+    assert runtime.legacy_tasks == set()
 
 
 @pytest.mark.asyncio

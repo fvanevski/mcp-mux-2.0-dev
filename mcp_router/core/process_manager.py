@@ -187,8 +187,11 @@ class ProcessManager:
             # Retirement must become non-activatable before the first await,
             # even when no managed process is currently running.
             runtime.state = RuntimeState.DRAINING
-        await runtime.wait_for_leases()
+        # Bridge setup/response work can pin upstream-work leases. Cancel it before
+        # waiting for the lease count to reach zero so retirement cannot deadlock
+        # behind compatibility work that retirement itself must terminate.
         await runtime.cancel_legacy_tasks()
+        await runtime.wait_for_leases()
         await self.stop_managed_server(runtime, final_state=final_state)
 
     async def stop_managed_server(

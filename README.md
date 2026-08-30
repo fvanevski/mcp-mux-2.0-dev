@@ -13,12 +13,12 @@
   - **Remote**: Seamless proxying to external HTTP MCP endpoints.
   - **Managed CLI**: Native spawning of command-line tools (e.g., via `npx` or `uvx`).
 - 🧩 **Configurable Request Headers**: Adds endpoint-specific upstream headers, including tokens loaded from environment variables.
-- 🌉 **Optional Local SSE-to-Streamable-HTTP Bridge**: Streamable HTTP endpoints are proxied as Streamable HTTP by default. Endpoints can opt into a legacy SSE compatibility bridge when traditional SSE clients need a local `event: endpoint` flow.
+- 🌉 **Deprecated, Bounded Local SSE Compatibility Adapter**: Streamable HTTP endpoints stay on the canonical transport by default. An endpoint may explicitly opt into the legacy local `event: endpoint` flow with bounded queue, backpressure, TTL, and session-count policy.
 - ⚡ **Automatic Transport Auto-Detection**: Dynamically detects the backend transport mode (`streamable-http` vs `sse`) based on URL paths. Sub-servers with `/mcp` or `/mcp/` in their URL automatically default to `streamable-http`.
-- 🛡️ **Session Propagation & Isolation**: For opt-in legacy bridge sessions, tracks local sessions per endpoint, maps upstream `Mcp-Session-Id` values to the correct local session, and rejects cross-endpoint session reuse.
-- 🤝 **Streamable HTTP Client Compatibility**: Normalizes upstream `Accept` headers for Streamable HTTP POST/DELETE requests and fills in missing JSON-RPC `"jsonrpc": "2.0"` fields for request bodies that otherwise look like JSON-RPC messages.
+- 🛡️ **Session Propagation & Isolation**: For explicitly enabled legacy bridge sessions, maps upstream `Mcp-Session-Id` values to endpoint-owned local sessions, rejects cross-endpoint reuse, and deterministically cleans up expired/disconnected sessions and owned upstream work.
+- 🤝 **Strict Streamable HTTP Client Compatibility**: Normalizes required upstream transport headers while rejecting malformed JSON-RPC and modern protocol/header mismatches rather than repairing invalid request bodies.
 - 🧼 **Decoded Response Header Safety**: Strips stale `Content-Encoding` and upstream `Content-Length` headers when the router reads and rebuilds JSON responses.
-- 📊 **Token-Saving Metadata Endpoint**: Registers a custom `/summary` route returning only namespaces and descriptions, shielding AI clients from schema bloat.
+- 📊 **Operational Summary Endpoint**: `/summary` exposes endpoint/runtime state plus bounded legacy-adapter utilization and failure counters without importing the adapter on ordinary modern traffic.
 - 🧹 **Clean Subprocess Lifecycle**: The manager isolates background subprocesses inside unique Unix process groups (`os.setsid`) to guarantee no zombie processes are left behind on teardown.
 
 ---
@@ -33,7 +33,7 @@ graph TD
     D -->|Spawns / Cleans up| E[Managed Subprocesses: uvx / npx]
     A --> F[server.py - MCPRouter]
     F -->|Proxy SSE| G[Remote SSE Servers]
-    F -->|Proxy Streamable HTTP & map sessions| H[Streamable HTTP Servers]
+    F -->|Proxy Streamable HTTP| H[Streamable HTTP Servers]
     A --> I[summary route]
 ```
 
@@ -113,7 +113,7 @@ Configuration values support shell-style environment references before validatio
 | `summary` | String | Yes | Brief description of the sub-server, returned by `/summary`. |
 | `timeout` | Integer | No | Inactivity timeout in seconds for CLI mode (defaults to 300). |
 | `transport` | String | No | Transport mode (`sse` or `streamable-http`). Automatically detected if omitted. |
-| `legacy_sse_bridge` | Boolean | No | For `streamable-http` endpoints only. Defaults to `false`; set to `true` to expose the local legacy SSE bridge instead of preserving upstream GET+SSE behavior. |
+| `legacy_sse_bridge` | Mapping | No | Deprecated compatibility adapter for `streamable-http` endpoints only. Omit to disable. When present, configures `queue_capacity`, `backpressure_timeout`, `session_ttl`, and `max_sessions`. |
 | `headers` | Mapping | No | Extra request headers forwarded upstream after environment expansion. |
 | `allowed_tools` | List of Strings | No | Allowlist of tool names. Only these tools are exposed. |
 | `denied_tools` | List of Strings | No | Denylist of tool names. These tools are excluded. (Ignored if `allowed_tools` is set). |
@@ -125,7 +125,17 @@ For `streamable-http` endpoints, the mux preserves the original transport by def
 - `POST /<path>` forwards JSON-RPC messages to the upstream MCP endpoint.
 - `GET /<path>` with `Accept: text/event-stream` forwards to the upstream MCP endpoint and preserves the upstream response status and stream.
 
-To expose the legacy local SSE bridge, set `legacy_sse_bridge: true` on that endpoint. SSE clients can then connect with:
+The local SSE adapter is deprecated and disabled unless an endpoint supplies an explicit bounded mapping, for example:
+
+```yaml
+legacy_sse_bridge:
+  queue_capacity: 32
+  backpressure_timeout: 1.0
+  session_ttl: 300.0
+  max_sessions: 32
+```
+
+An explicitly configured legacy SSE client can then connect with:
 
 ```bash
 curl -N -H 'Accept: text/event-stream' http://127.0.0.1:8012/huggingface
@@ -138,7 +148,9 @@ event: endpoint
 data: /huggingface?session_id=<local-session-id>
 ```
 
-Client POSTs to that local URL are forwarded upstream. If the upstream returns `Mcp-Session-Id`, the router stores it on the local bridge session and forwards it on later POSTs for the same endpoint. Sessions are removed when the local SSE stream closes or when their endpoint is removed or changed during config reload.
+Client POSTs to that local URL are forwarded upstream. If the upstream returns `Mcp-Session-Id`, the adapter stores it on the endpoint-owned local session and forwards it on later POSTs for that endpoint. Sessions are removed on disconnect, TTL expiry, endpoint retirement/configuration change, backpressure failure, or application shutdown. Excess sessions are rejected, asynchronous bridge failures are surfaced as terminal SSE error events, and `/summary` reports active-session and failure counters to support a future evidence-based removal decision.
+
+`stdio_bridge` is intentionally unsupported: configuration accepts only `remote` and `managed_cli`. A stdio mode must remain rejected until a complete end-to-end adapter is implemented through the shared runtime/policy boundary.
 
 ---
 

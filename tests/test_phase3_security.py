@@ -30,7 +30,7 @@ from mcp_router.core.protocol import (
 )
 from mcp_router.core.redaction import SecretRedactor
 from mcp_router.core.security import validate_bind_security
-from mcp_router.server import BridgeSession, MCPRouter
+from mcp_router.server import MCPRouter
 
 
 def modern_body(method: str, params: dict[str, object] | None = None) -> dict[str, Any]:
@@ -607,13 +607,14 @@ async def test_policy_only_reload_does_not_restart_managed_process_or_drop_sessi
         url="http://127.0.0.1:8123/mcp",
         summary="Example",
         allowed_tools=["tool_a"],
-        legacy_sse_bridge=True,
+        legacy_sse_bridge={},
     )
     isolated._configs = {"example": previous}
-    isolated.active_sessions["session"] = BridgeSession(
-        path_prefix="example",
-        queue=asyncio.Queue(),
-    )
+    runtime = isolated._runtimes["example"]
+    bridge = isolated._get_legacy_bridge()
+    bridge_response = bridge.open_session(endpoint=previous, runtime=runtime)
+    assert isinstance(bridge_response, StreamingResponse)
+    session_id = next(iter(bridge.sessions))
 
     updated = RouterConfig.model_validate(
         {
@@ -625,7 +626,7 @@ async def test_policy_only_reload_does_not_restart_managed_process_or_drop_sessi
                     "url": "http://127.0.0.1:8123/mcp",
                     "summary": "Example",
                     "allowed_tools": ["tool_b"],
-                    "legacy_sse_bridge": True,
+                    "legacy_sse_bridge": {},
                 }
             ]
         }
@@ -639,8 +640,11 @@ async def test_policy_only_reload_does_not_restart_managed_process_or_drop_sessi
         await isolated.apply_configuration(updated)
 
     stop_managed.assert_not_awaited()
-    assert "session" in isolated.active_sessions
+    assert isolated._runtimes["example"] is runtime
+    assert session_id in bridge.sessions
     assert isolated._configs["example"].allowed_tools == ["tool_b"]
+    await bridge.close_all()
+    assert runtime.legacy_tasks == set()
 
 
 @pytest.mark.asyncio

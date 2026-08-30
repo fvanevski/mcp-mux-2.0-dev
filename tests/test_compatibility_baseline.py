@@ -29,11 +29,11 @@ OPERATOR_VERIFIED_MODERN_SCENARIOS = [
 def _reset_router_runtime_state():
     router._configs = {}
     router._http_client = None
-    router.active_sessions.clear()
+    router._legacy_bridge = None
     yield
     router._configs = {}
     router._http_client = None
-    router.active_sessions.clear()
+    router._legacy_bridge = None
 
 
 def _outbound_client_factory(upstream: MockMCPUpstream):
@@ -94,7 +94,7 @@ def test_configured_upstreams_are_frozen_as_streamable_http(path: str, mode: str
     assert endpoint.mode == mode
     assert endpoint.url == url
     assert endpoint.transport == "streamable-http"
-    assert endpoint.legacy_sse_bridge is False
+    assert endpoint.legacy_sse_bridge is None
 
 
 @pytest.mark.asyncio
@@ -154,7 +154,7 @@ async def test_operator_verified_modern_client_scenarios(scenario_id: str, names
     tool = second.json()["result"]["tools"][0]
     assert tool["name"] == "baseline_tool"
     assert tool["inputSchema"]["type"] == "object"
-    assert router.active_sessions == {}
+    assert router._legacy_bridge is None
     assert len(upstream.requests) == 2
     assert all(request.path == "/mcp" for request in upstream.requests)
 
@@ -349,7 +349,7 @@ async def test_legacy_sessionful_streamable_http_baseline():
     assert session_id == upstream.legacy_session_id
     assert tools.status_code == 200
     assert tools.json()["result"]["tools"][0]["name"] == "legacy_tool"
-    assert router.active_sessions == {}
+    assert router._legacy_bridge is None
     assert upstream.requests[1].headers["mcp-session-id"] == upstream.legacy_session_id
 
 

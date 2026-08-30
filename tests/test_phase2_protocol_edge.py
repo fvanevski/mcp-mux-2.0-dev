@@ -404,7 +404,7 @@ async def test_valid_modern_request_forwards_original_bytes_unknown_fields_and_t
     assert timeout.write == 12.5
     assert timeout.pool == 12.5
     assert kwargs["headers"]["MCP-Protocol-Version"] == MODERN_PROTOCOL_VERSION
-    assert isolated.active_sessions == {}
+    assert isolated._legacy_bridge is None
 
 
 @pytest.mark.asyncio
