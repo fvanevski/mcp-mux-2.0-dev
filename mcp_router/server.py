@@ -923,31 +923,19 @@ class MCPRouter:
                     ),
                     limit_lease,
                 )
-            if endpoint.legacy_sse_bridge:
+            if endpoint.legacy_sse_bridge is not None:
                 # Local compatibility SSE does not acquire an upstream lease, so
                 # retirement admission must be checked explicitly. There is no
-                # await between this state check and session publication.
+                # await between this state check and adapter session publication.
                 if runtime.state is RuntimeState.DRAINING:
                     return await self._finish_leased_response(
                         JSONResponse({"error": "Endpoint runtime is draining"}, status_code=503),
                         limit_lease,
                     )
-                session_id = uuid4().hex
-                queue: asyncio.Queue[str] = asyncio.Queue()
-                self.active_sessions[session_id] = BridgeSession(
-                    path_prefix=path_prefix,
-                    queue=queue,
-                )
-                runtime.legacy_session_ids.add(session_id)
                 return await self._finish_leased_response(
-                    StreamingResponse(
-                        self.local_sse_generator(session_id, queue, path_prefix),
-                        media_type="text/event-stream",
-                        headers={
-                            "Cache-Control": "no-cache",
-                            "Connection": "keep-alive",
-                            "X-Accel-Buffering": "no",
-                        },
+                    self._get_legacy_bridge().open_session(
+                        endpoint=endpoint,
+                        runtime=runtime,
                     ),
                     limit_lease,
                 )
@@ -958,12 +946,9 @@ class MCPRouter:
             and endpoint.transport == "streamable-http"
             and session_id
             and request_era is ProtocolEra.LEGACY
-            and not endpoint.legacy_sse_bridge
+            and endpoint.legacy_sse_bridge is None
         ):
-            stale_session = self.active_sessions.get(session_id)
-            if stale_session is not None and stale_session.path_prefix == path_prefix:
-                self.active_sessions.pop(session_id, None)
-                runtime.legacy_session_ids.discard(session_id)
+            # The disabled path does not import or inspect legacy adapter state.
             return await self._finish_leased_response(
                 _transport_error_response(
                     400,
@@ -1009,16 +994,16 @@ class MCPRouter:
         if (
             request.method == "POST"
             and endpoint.transport == "streamable-http"
-            and endpoint.legacy_sse_bridge
+            and endpoint.legacy_sse_bridge is not None
             and session_id
             and request_era is ProtocolEra.LEGACY
         ):
-            # The request task owns both leases until _bridge_post() returns.
+            # The request task owns both leases until the compatibility adapter returns.
             # A successful return means the bridge either released them for an
             # early response or transferred ownership to its tracked response task.
             bridge_setup_owns_leases = True
             try:
-                response = await self._bridge_post(
+                response = await self._get_legacy_bridge().handle_post(
                     request=request,
                     endpoint=endpoint,
                     runtime=runtime,
@@ -1084,6 +1069,8 @@ async def lifespan(app: Starlette):
                 pass
             router._checker_task = None
         await watcher.stop()
+        if router._legacy_bridge is not None:
+            await router._legacy_bridge.close_all()
         await router.process_manager.cleanup(list(router._runtimes.values()))
         await router.close_http_client()
         router._running = False
