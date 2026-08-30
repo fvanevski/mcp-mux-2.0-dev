@@ -905,21 +905,20 @@ class MCPRouter:
 
     async def catch_all_proxy(self, request: Request) -> Response:
         path_prefix = request.path_params.get("path_prefix")
-        if not path_prefix or path_prefix not in self._configs:
+        if not path_prefix or path_prefix not in self._runtimes:
             return JSONResponse(
                 {"error": f"Endpoint '{path_prefix}' not configured"},
                 status_code=404,
             )
 
-        endpoint = self._configs[path_prefix]
+        runtime = self._runtimes[path_prefix]
+        endpoint = runtime.config
         subpath = request.path_params.get("subpath")
         if subpath is not None and endpoint.transport != "sse":
             return _transport_error_response(
                 404,
                 f"Streamable HTTP endpoint '/{path_prefix}' does not expose subpaths",
             )
-
-        self.last_activity[path_prefix] = time.time()
 
         request_body = b""
         parsed_request: ParsedJSONRPCRequest | None = None
@@ -1000,12 +999,6 @@ class MCPRouter:
                 status_code=429,
             )
 
-        activation_error = await self._ensure_managed_server(path_prefix, endpoint)
-        if activation_error is not None:
-            if limit_lease is not None:
-                await limit_lease.release()
-            return activation_error
-
         request_path = request.url.path
         target_url = get_target_url(endpoint.url, request_path, path_prefix)
         if endpoint.transport == "sse" and request_path.startswith(f"/{path_prefix}/"):
@@ -1028,7 +1021,7 @@ class MCPRouter:
 
         if is_get and endpoint.transport == "streamable-http":
             if not is_sse_init:
-                return await self._finish_limited_response(
+                return await self._finish_leased_response(
                     _transport_error_response(
                         405,
                         "Use POST for Streamable HTTP JSON-RPC, or a supported legacy SSE GET",
@@ -1042,7 +1035,8 @@ class MCPRouter:
                     path_prefix=path_prefix,
                     queue=queue,
                 )
-                return await self._finish_limited_response(
+                runtime.legacy_session_ids.add(session_id)
+                return await self._finish_leased_response(
                     StreamingResponse(
                         self.local_sse_generator(session_id, queue, path_prefix),
                         media_type="text/event-stream",
@@ -1055,8 +1049,13 @@ class MCPRouter:
                     limit_lease,
                 )
 
+        runtime_lease, activation_error = await self._acquire_upstream_lease(runtime)
+        if activation_error is not None:
+            await self._release_leases(limit_lease)
+            return activation_error
+
         if is_get and endpoint.transport == "sse" and is_sse_init:
-            return await self._finish_limited_response(
+            return await self._finish_leased_response(
                 StreamingResponse(
                     self.sse_proxy_generator(
                         target_url,
@@ -1074,6 +1073,7 @@ class MCPRouter:
                     },
                 ),
                 limit_lease,
+                runtime_lease,
             )
 
         session_id = request.query_params.get("session_id")
@@ -1086,6 +1086,7 @@ class MCPRouter:
             return await self._bridge_post(
                 request=request,
                 endpoint=endpoint,
+                runtime=runtime,
                 path_prefix=path_prefix,
                 target_url=target_url,
                 forward_headers=forward_headers,
@@ -1093,7 +1094,7 @@ class MCPRouter:
                 session_id=session_id,
                 policy=policy,
                 principal=principal,
-                on_complete=None if limit_lease is None else limit_lease.release,
+                on_complete=lambda: self._release_leases(limit_lease, runtime_lease),
             )
 
         try:
@@ -1107,10 +1108,9 @@ class MCPRouter:
                 policy=policy,
                 principal=principal,
             )
-            return await self._finish_limited_response(response, limit_lease)
+            return await self._finish_leased_response(response, limit_lease, runtime_lease)
         except BaseException:
-            if limit_lease is not None:
-                await limit_lease.release()
+            await self._release_leases(limit_lease, runtime_lease)
             raise
 
 
