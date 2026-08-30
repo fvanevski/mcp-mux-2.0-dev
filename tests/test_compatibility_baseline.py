@@ -14,6 +14,7 @@ from tests.fixtures.mock_upstream import (
     MODERN_PROTOCOL_VERSION,
     PROTOCOL_VERSION_META,
     MockMCPUpstream,
+    MockMode,
 )
 
 OPERATOR_VERIFIED_MODERN_SCENARIOS = [
@@ -319,7 +320,7 @@ async def test_modern_fixture_does_not_use_legacy_session_header_for_protocol_st
     ids=["malformed-json", "http-503", "transport-failure"],
 )
 async def test_negative_upstream_fixtures_fail_closed_and_are_observable(
-    mode: str,
+    mode: MockMode,
     expected_status: int,
     expected_error: str,
 ):
@@ -332,7 +333,7 @@ async def test_negative_upstream_fixtures_fail_closed_and_are_observable(
             transport="streamable-http",
         )
     }
-    upstream = MockMCPUpstream(mode)  # type: ignore[arg-type]
+    upstream = MockMCPUpstream(mode)
     inbound_transport = httpx.ASGITransport(app=app)
 
     async with httpx.AsyncClient(transport=inbound_transport, base_url="http://localhost") as client:
