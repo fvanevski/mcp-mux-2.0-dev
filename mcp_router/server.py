@@ -22,6 +22,7 @@ from mcp_router.core.config_loader import (
     SecurityConfig,
 )
 from mcp_router.core.limits import LimitLease, RequestLimiter
+from mcp_router.core.observability import GatewayMetrics, GatewayObservabilityMiddleware
 from mcp_router.core.policy import CapabilityPolicy
 from mcp_router.core.process_manager import ProcessManager
 from mcp_router.core.protocol import (
@@ -244,14 +245,24 @@ class MCPRouter:
         self.security_config = SecurityConfig()
         self._redactor = SecretRedactor()
         self._limiter = RequestLimiter()
+        self._metrics = GatewayMetrics()
 
         self.app.add_middleware(
             GatewaySecurityMiddleware,
             get_config=lambda: self.security_config,
         )
+        self.app.add_middleware(
+            GatewayObservabilityMiddleware,
+            metrics=self._metrics,
+        )
         self.app.add_route(
             "/summary",
             self.get_summary,
+            methods=["GET"],
+        )
+        self.app.add_route(
+            "/metrics",
+            self.get_metrics,
             methods=["GET"],
         )
         self.app.add_route(
@@ -431,11 +442,28 @@ class MCPRouter:
                 "active_upstream_leases": runtime.active_leases,
                 "last_exit_code": runtime.last_exit_code,
                 "restart_attempts": runtime.restart_attempts,
+                "process_restarts_total": runtime.process_restarts_total,
+                **self._metrics.snapshot(runtime.path),
                 "legacy_sse_bridge": self._legacy_bridge_summary(runtime),
             }
             for runtime in self._runtimes.values()
         ]
         return JSONResponse({"endpoints": summary_list})
+
+    async def get_metrics(self, request: Request) -> JSONResponse:
+        del request
+        endpoints = [
+            {
+                "path": runtime.path,
+                "runtime_state": runtime.state.value,
+                "active_upstream_leases": runtime.active_leases,
+                "process_restarts_total": runtime.process_restarts_total,
+                **self._metrics.snapshot(runtime.path),
+                "legacy_sse_bridge": self._legacy_bridge_summary(runtime),
+            }
+            for runtime in self._runtimes.values()
+        ]
+        return JSONResponse({"endpoints": endpoints})
 
     async def _read_post_body(
         self,
@@ -672,6 +700,7 @@ class MCPRouter:
                 timeout=endpoint.upstream_timeout,
             )
         except (ClientDisconnect, httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
+            self._metrics.record_upstream_error(path_prefix)
             logger.error(
                 "Proxy error for %s: %s",
                 path_prefix,
@@ -679,6 +708,8 @@ class MCPRouter:
             )
             return JSONResponse({"error": "Upstream proxy request failed"}, status_code=502)
 
+        if response.status_code >= 500:
+            self._metrics.record_upstream_error(path_prefix)
         content_type = response.headers.get("content-type", "")
         if "application/json" in content_type.casefold():
             try:
@@ -687,6 +718,7 @@ class MCPRouter:
                     timeout=endpoint.upstream_timeout,
                 )
             except TimeoutError:
+                self._metrics.record_upstream_error(path_prefix)
                 return JSONResponse({"error": "Upstream response timed out"}, status_code=504)
             finally:
                 await stream_context.__aexit__(None, None, None)
@@ -800,6 +832,9 @@ class MCPRouter:
 
     async def catch_all_proxy(self, request: Request) -> Response:
         path_prefix = request.path_params.get("path_prefix")
+        scope = request.scope
+        if isinstance(path_prefix, str):
+            scope["mcp.endpoint"] = path_prefix
         if not path_prefix or path_prefix not in self._runtimes:
             return JSONResponse(
                 {"error": f"Endpoint '{path_prefix}' not configured"},
@@ -823,6 +858,10 @@ class MCPRouter:
             if isinstance(body_result, JSONResponse):
                 return body_result
             request_body, parsed_request, request_era = body_result
+            scope["mcp.protocol_revision"] = (
+                MODERN_PROTOCOL_VERSION if request_era is ProtocolEra.MODERN else "legacy"
+            )
+            scope["mcp.method"] = parsed_request.method
             if request_era is ProtocolEra.MODERN and endpoint.transport != "streamable-http":
                 return _transport_error_response(
                     400,
@@ -853,6 +892,11 @@ class MCPRouter:
             except ProtocolRequestError as exc:
                 return _jsonrpc_error_response(exc)
             request_name = policy_names[0] if len(policy_names) == 1 else None
+            if request_name is not None:
+                observable_name = request_name
+                if parsed_request.method.startswith("resources/"):
+                    observable_name = observable_name.split("?", 1)[0].split("#", 1)[0]
+                scope["mcp.capability"] = self._redactor.redact(observable_name)
             for policy_name in policy_names or (None,):
                 decision = policy.authorize(
                     principal=principal,
@@ -861,6 +905,8 @@ class MCPRouter:
                     name=policy_name,
                 )
                 if not decision.allowed:
+                    scope["mcp.policy_outcome"] = "denied"
+                    self._metrics.record_denied_call(path_prefix)
                     if parsed_request.request_id is None:
                         return Response(status_code=403)
                     return JSONResponse(
@@ -871,6 +917,9 @@ class MCPRouter:
                         ),
                         status_code=403,
                     )
+            scope["mcp.policy_outcome"] = "allowed"
+        else:
+            scope["mcp.policy_outcome"] = "not_applicable"
 
         tool_limit_name = (
             request_name
@@ -882,6 +931,7 @@ class MCPRouter:
             capability_name=tool_limit_name,
         )
         if limit_rejection is not None:
+            scope["mcp.policy_outcome"] = "limited"
             if parsed_request is None or parsed_request.request_id is None:
                 return Response(status_code=429)
             return JSONResponse(
@@ -1040,7 +1090,7 @@ class MCPRouter:
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(BASE_DIR, "config.yaml")
+CONFIG_PATH = os.environ.get("MCP_MUX_CONFIG", os.path.join(BASE_DIR, "config.yaml"))
 
 
 @asynccontextmanager
