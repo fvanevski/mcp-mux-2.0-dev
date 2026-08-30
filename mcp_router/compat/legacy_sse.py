@@ -4,9 +4,9 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Protocol
 
 import httpx
 from starlette.requests import Request
@@ -51,19 +51,11 @@ class ClosedSession:
     message: str
 
 
-class _StreamContext(Protocol):
-    async def __aenter__(self) -> httpx.Response: ...
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        traceback: object | None,
-    ) -> object: ...
-
-
 class _TrackedUpstream:
-    def __init__(self, context: _StreamContext) -> None:
+    def __init__(
+        self,
+        context: AbstractAsyncContextManager[httpx.Response],
+    ) -> None:
         self._context = context
         self._closed = False
         self._lock = asyncio.Lock()
@@ -381,8 +373,6 @@ class LegacySSEBridge:
                             self._message_event(redacted),
                         ):
                             return
-            except asyncio.CancelledError:
-                raise
             except (
                 TimeoutError,
                 httpx.HTTPError,
@@ -612,7 +602,7 @@ class LegacySSEBridge:
     def _message_event(data: str) -> bytes:
         lines = ["event: message"]
         lines.extend(f"data: {line}" for line in data.splitlines() or [""])
-        return ("\n".join(lines) + "\n\n").encode("utf-8")
+        return ("\n".join(lines) + "\n\n").encode()
 
     @staticmethod
     def _error_event(*, code: str, message: str, status_code: int) -> bytes:
