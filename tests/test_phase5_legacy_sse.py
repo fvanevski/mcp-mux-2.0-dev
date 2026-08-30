@@ -290,6 +290,7 @@ async def test_bridge_disconnect_cancels_response_and_closes_upstream() -> None:
         new_callable=AsyncMock,
         return_value=client,
     ):
+        bridge._client_provider = router._get_http_client
         post = await router.catch_all_proxy(
             _request(
                 "POST",
@@ -391,6 +392,7 @@ async def test_bridge_session_cannot_cross_endpoint_boundary() -> None:
         "_get_http_client",
         new_callable=AsyncMock,
     ) as get_client:
+        bridge._client_provider = get_client
         response = await router.catch_all_proxy(
             _request(
                 "POST",
@@ -412,7 +414,7 @@ async def test_upstream_http_failure_is_synchronous_and_observable() -> None:
     router = MCPRouter(Starlette(), "unused")
     endpoint = _endpoint(path="legacy", bridge={"max_sessions": 2})
     router._configs = {"legacy": endpoint}
-    _bridge, session, iterator = await _open_bridge(router, "legacy")
+    bridge, session, iterator = await _open_bridge(router, "legacy")
 
     upstream_response = MagicMock()
     upstream_response.status_code = 503
@@ -430,6 +432,7 @@ async def test_upstream_http_failure_is_synchronous_and_observable() -> None:
         new_callable=AsyncMock,
         return_value=client,
     ):
+        bridge._client_provider = router._get_http_client
         response = await router.catch_all_proxy(
             _request(
                 "POST",
@@ -483,6 +486,7 @@ async def test_async_upstream_failure_reaches_downstream_error_event() -> None:
         new_callable=AsyncMock,
         return_value=client,
     ):
+        bridge._client_provider = router._get_http_client
         response = await router.catch_all_proxy(
             _request(
                 "POST",
