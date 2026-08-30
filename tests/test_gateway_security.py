@@ -6,7 +6,12 @@ from pydantic import SecretStr
 from starlette.responses import JSONResponse
 
 from mcp_router.core.config_loader import SecurityConfig
-from mcp_router.core.security import ASGIApp, ASGIReceive, ASGISend, GatewaySecurityMiddleware
+from mcp_router.core.security import (
+    ASGIApp,
+    ASGIReceive,
+    ASGISend,
+    GatewaySecurityMiddleware,
+)
 
 
 async def _ok_app(scope: dict, receive: ASGIReceive, send: ASGISend) -> None:
