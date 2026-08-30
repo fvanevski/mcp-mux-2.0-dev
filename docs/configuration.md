@@ -86,7 +86,7 @@ tool_limits:
     requests_per_minute: 30
 ```
 
-An exceeded limit is rejected locally before managed-process activation or upstream dispatch. Streaming responses hold their endpoint concurrency lease until the downstream stream closes. Buffered upstream read failures release an acquired concurrency lease before the exception propagates, so a transient upstream failure cannot permanently consume endpoint capacity. Rate windows are one minute and are scoped independently per endpoint and configured tool.
+An exceeded limit is rejected locally before managed-process activation or upstream dispatch. Streaming responses hold their endpoint concurrency and runtime-work leases until the downstream stream closes. Teardown is exception-safe: if closing the upstream iterator or HTTP stream context itself fails, that close exception still propagates but runtime and limiter ownership are released unconditionally, so retirement/idle shutdown cannot remain pinned by failed stream cleanup. Buffered upstream read failures likewise release acquired concurrency ownership before the exception propagates. Rate windows are one minute and are scoped independently per endpoint and configured tool.
 
 ## Remote endpoint
 

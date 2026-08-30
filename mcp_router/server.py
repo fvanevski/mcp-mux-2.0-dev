@@ -576,9 +576,14 @@ class MCPRouter:
                     yield chunk
             finally:
                 close_iterator = getattr(original_iterator, "aclose", None)
-                if close_iterator is not None:
-                    await close_iterator()
-                await self._release_leases(*active_leases)
+                try:
+                    if close_iterator is not None:
+                        await close_iterator()
+                finally:
+                    # Lease ownership must end even when the upstream iterator's
+                    # own teardown fails. Preserve that close exception while making
+                    # runtime/limiter release the unconditional secondary cleanup.
+                    await self._release_leases(*active_leases)
 
         response.body_iterator = leased_iterator()
         return response

@@ -22,6 +22,7 @@ from mcp_router.core.config_loader import (
     ManagedRestartConfig,
     RouterConfig,
 )
+from mcp_router.core.policy import CapabilityPolicy
 from mcp_router.core.process_manager import ProcessManager
 from mcp_router.core.runtime import EndpointRuntime, RuntimeState
 from mcp_router.server import BridgeSession, MCPRouter
@@ -185,6 +186,95 @@ async def test_runtime_lease_spans_stream_lifetime() -> None:
 
     await iterator.aclose()
     assert runtime.active_leases == 0
+
+
+@pytest.mark.asyncio
+async def test_stream_teardown_failure_still_releases_runtime_and_limit_leases() -> None:
+    router = MCPRouter(Starlette(), "unused")
+    endpoint = RouterConfig.model_validate(
+        {
+            "endpoints": [
+                {
+                    "path": "remote",
+                    "mode": "remote",
+                    "url": "https://example.test/mcp",
+                    "summary": "Abnormal stream teardown fixture",
+                    "limits": {"max_concurrent": 1},
+                }
+            ]
+        }
+    ).endpoints[0]
+    router._configs = {"remote": endpoint}
+    runtime = router._runtimes["remote"]
+
+    runtime_lease = await runtime.acquire_lease()
+    limit_lease, limit_rejection = await router._limiter.acquire(endpoint)
+    assert limit_rejection is None
+    assert limit_lease is not None
+
+    held_lease, held_rejection = await router._limiter.acquire(endpoint)
+    assert held_lease is None
+    assert held_rejection is not None
+
+    async def upstream_lines():
+        yield "event: message"
+        yield 'data: {"jsonrpc":"2.0","id":1,"result":{}}'
+        yield ""
+        await asyncio.Event().wait()
+
+    upstream_response = MagicMock()
+    upstream_response.status_code = 200
+    upstream_response.headers = httpx.Headers({"content-type": "text/event-stream"})
+    upstream_response.aiter_lines = upstream_lines
+
+    stream_context = MagicMock()
+    stream_context.__aenter__ = AsyncMock(return_value=upstream_response)
+    stream_context.__aexit__ = AsyncMock(side_effect=RuntimeError("upstream close failed"))
+    client = MagicMock()
+    client.stream = MagicMock(return_value=stream_context)
+
+    request = _proxy_request(
+        "POST",
+        "remote",
+        headers={"content-type": "application/json"},
+        body=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+    )
+
+    with patch.object(
+        router,
+        "_get_http_client",
+        new_callable=AsyncMock,
+        return_value=client,
+    ):
+        upstream = await router._proxy_request(
+            request=request,
+            endpoint=endpoint,
+            path_prefix="remote",
+            target_url=endpoint.url,
+            forward_headers={},
+            request_body=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+            policy=CapabilityPolicy.from_endpoint(endpoint),
+            principal="local",
+        )
+
+    wrapped = await router._finish_leased_response(upstream, limit_lease, runtime_lease)
+    assert isinstance(wrapped, StreamingResponse)
+    iterator = cast(AsyncGenerator[bytes], wrapped.body_iterator)
+
+    assert await anext(iterator) == b'event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{}}\n\n'
+    assert runtime.active_leases == 1
+
+    with pytest.raises(RuntimeError, match="upstream close failed"):
+        await iterator.aclose()
+
+    stream_context.__aexit__.assert_awaited_once_with(None, None, None)
+    assert runtime.active_leases == 0
+    await asyncio.wait_for(runtime.wait_for_leases(), timeout=0.1)
+
+    recovered_lease, recovered_rejection = await router._limiter.acquire(endpoint)
+    assert recovered_rejection is None
+    assert recovered_lease is not None
+    await recovered_lease.release()
 
 
 @pytest.mark.asyncio
