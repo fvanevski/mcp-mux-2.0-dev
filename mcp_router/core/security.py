@@ -9,10 +9,10 @@ from starlette.responses import JSONResponse
 
 from mcp_router.core.config_loader import Endpoint, SecurityConfig
 
-ASGIApp = Callable[
-    [MutableMapping[str, Any], Callable[[], Awaitable[dict[str, Any]]], Callable[[dict[str, Any]], Awaitable[None]]],
-    Awaitable[None],
-]
+ASGIMessage = MutableMapping[str, Any]
+ASGIReceive = Callable[[], Awaitable[ASGIMessage]]
+ASGISend = Callable[[ASGIMessage], Awaitable[None]]
+ASGIApp = Callable[[MutableMapping[str, Any], ASGIReceive, ASGISend], Awaitable[None]]
 
 _HOP_BY_HOP_REQUEST_HEADERS = {
     "host",
@@ -191,8 +191,8 @@ class GatewaySecurityMiddleware:
     async def __call__(
         self,
         scope: MutableMapping[str, Any],
-        receive: Callable[[], Awaitable[dict[str, Any]]],
-        send: Callable[[dict[str, Any]], Awaitable[None]],
+        receive: ASGIReceive,
+        send: ASGISend,
     ) -> None:
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
@@ -234,8 +234,8 @@ class GatewaySecurityMiddleware:
         if security.mode == "local_only":
             principal = "local"
         else:
-            principal = self._authenticated_principal(headers, peer, security)
-            if principal is None:
+            authenticated_principal = self._authenticated_principal(headers, peer, security)
+            if authenticated_principal is None:
                 await self._reject(
                     scope,
                     receive,
@@ -245,6 +245,7 @@ class GatewaySecurityMiddleware:
                     extra_headers={"WWW-Authenticate": "Bearer"},
                 )
                 return
+            principal = authenticated_principal
 
         scope["mcp.principal"] = principal
 
@@ -252,7 +253,7 @@ class GatewaySecurityMiddleware:
             await self.app(scope, receive, send)
             return
 
-        async def cors_send(message: dict[str, Any]) -> None:
+        async def cors_send(message: ASGIMessage) -> None:
             if message.get("type") == "http.response.start":
                 raw_headers = list(message.get("headers", []))
                 for key, value in self._cors_headers(origin).items():
@@ -296,8 +297,8 @@ class GatewaySecurityMiddleware:
     @staticmethod
     async def _reject(
         scope: MutableMapping[str, Any],
-        receive: Callable[[], Awaitable[dict[str, Any]]],
-        send: Callable[[dict[str, Any]], Awaitable[None]],
+        receive: ASGIReceive,
+        send: ASGISend,
         status_code: int,
         message: str,
         *,
