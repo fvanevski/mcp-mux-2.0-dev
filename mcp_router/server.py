@@ -319,7 +319,10 @@ class MCPRouter:
             for path in sorted(retired_paths):
                 runtime = current_runtimes[path]
                 logger.info("Draining runtime-affecting configuration change for %s.", path)
-                await self.process_manager.drain_and_stop(runtime)
+                await self.process_manager.drain_and_stop(
+                    runtime,
+                    final_state=RuntimeState.DRAINING,
+                )
                 self._drop_sessions_for_path(path)
 
             next_runtimes: dict[str, EndpointRuntime] = {}
@@ -469,7 +472,14 @@ class MCPRouter:
         if runtime.managed:
             if runtime.state is RuntimeState.DRAINING:
                 return None, JSONResponse({"error": "Managed endpoint is draining"}, status_code=503)
-            if not self.process_manager.is_running(runtime) or runtime.state is not RuntimeState.RUNNING:
+            if runtime.state is RuntimeState.FAILED:
+                return None, JSONResponse({"error": "Managed endpoint is failed"}, status_code=503)
+            if runtime.state is RuntimeState.RUNNING and not self.process_manager.is_running(runtime):
+                return None, JSONResponse(
+                    {"error": "Managed endpoint process is unavailable"},
+                    status_code=503,
+                )
+            if runtime.state is not RuntimeState.RUNNING:
                 logger.info("On-demand activation triggered for: %s", runtime.path)
                 try:
                     await self.process_manager.start_managed_server(runtime)

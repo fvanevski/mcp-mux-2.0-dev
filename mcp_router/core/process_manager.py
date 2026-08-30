@@ -40,6 +40,11 @@ class ProcessManager:
 
     async def start_managed_server(self, runtime: EndpointRuntime) -> str:
         async with runtime.lock:
+            if runtime.state is RuntimeState.FAILED:
+                raise RuntimeError(
+                    f"Managed endpoint '{runtime.path}' is failed; "
+                    "automatic recovery or runtime reconfiguration is required"
+                )
             return await self._start_locked(runtime, reset_restart_attempts=True)
 
     async def _start_locked(
@@ -165,17 +170,27 @@ class ProcessManager:
             await self._terminate_locked(runtime, final_state=RuntimeState.FAILED)
             raise
 
-    async def drain_and_stop(self, runtime: EndpointRuntime) -> None:
+    async def drain_and_stop(
+        self,
+        runtime: EndpointRuntime,
+        *,
+        final_state: RuntimeState = RuntimeState.STOPPED,
+    ) -> None:
         async with runtime.lock:
             if runtime.state is not RuntimeState.STOPPED:
                 runtime.state = RuntimeState.DRAINING
         await runtime.wait_for_leases()
         await runtime.cancel_legacy_tasks()
-        await self.stop_managed_server(runtime)
+        await self.stop_managed_server(runtime, final_state=final_state)
 
-    async def stop_managed_server(self, runtime: EndpointRuntime) -> None:
+    async def stop_managed_server(
+        self,
+        runtime: EndpointRuntime,
+        *,
+        final_state: RuntimeState = RuntimeState.STOPPED,
+    ) -> None:
         async with runtime.lock:
-            await self._terminate_locked(runtime, final_state=RuntimeState.STOPPED)
+            await self._terminate_locked(runtime, final_state=final_state)
 
     async def _terminate_locked(
         self,
@@ -379,20 +394,38 @@ class ProcessManager:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 return False
-            probe_timeout = min(max(readiness.interval, 0.1), remaining)
-            if await self._probe_modern_discovery(endpoint_cfg.url, probe_timeout):
+            if await self._probe_modern_discovery(endpoint_cfg, remaining):
                 return True
-            if (
-                readiness.legacy_initialize_fallback
-                and await self._probe_legacy_initialize(endpoint_cfg.url, probe_timeout)
-            ):
-                return True
+            if readiness.legacy_initialize_fallback:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    return False
+                if await self._probe_legacy_initialize(endpoint_cfg, remaining):
+                    return True
             remaining = deadline - loop.time()
             if remaining <= 0:
                 return False
             await asyncio.sleep(min(readiness.interval, remaining))
 
-    async def _probe_modern_discovery(self, url: str, timeout: float) -> bool:
+    @staticmethod
+    def _merge_probe_headers(
+        endpoint_cfg: ManagedEndpointConfig,
+        required: dict[str, str],
+    ) -> dict[str, str]:
+        required_names = {name.casefold() for name in required}
+        headers = {
+            name: value
+            for name, value in (endpoint_cfg.headers or {}).items()
+            if name.casefold() not in required_names
+        }
+        headers.update(required)
+        return headers
+
+    async def _probe_modern_discovery(
+        self,
+        endpoint_cfg: ManagedEndpointConfig,
+        timeout: float,
+    ) -> bool:
         payload = {
             "jsonrpc": "2.0",
             "id": _READINESS_REQUEST_ID,
@@ -404,15 +437,22 @@ class ProcessManager:
                 }
             },
         }
-        headers = {
-            "content-type": "application/json",
-            "accept": "application/json, text/event-stream",
-            "MCP-Protocol-Version": MODERN_PROTOCOL_VERSION,
-            "Mcp-Method": "server/discover",
-        }
-        return await self._probe_jsonrpc_result(url, payload, headers, timeout)
+        headers = self._merge_probe_headers(
+            endpoint_cfg,
+            {
+                "content-type": "application/json",
+                "accept": "application/json, text/event-stream",
+                "MCP-Protocol-Version": MODERN_PROTOCOL_VERSION,
+                "Mcp-Method": "server/discover",
+            },
+        )
+        return await self._probe_jsonrpc_result(endpoint_cfg.url, payload, headers, timeout)
 
-    async def _probe_legacy_initialize(self, url: str, timeout: float) -> bool:
+    async def _probe_legacy_initialize(
+        self,
+        endpoint_cfg: ManagedEndpointConfig,
+        timeout: float,
+    ) -> bool:
         payload = {
             "jsonrpc": "2.0",
             "id": _READINESS_REQUEST_ID,
@@ -423,11 +463,14 @@ class ProcessManager:
                 "clientInfo": {"name": "mcp-mux-readiness", "version": "0"},
             },
         }
-        headers = {
-            "content-type": "application/json",
-            "accept": "application/json, text/event-stream",
-        }
-        return await self._probe_jsonrpc_result(url, payload, headers, timeout)
+        headers = self._merge_probe_headers(
+            endpoint_cfg,
+            {
+                "content-type": "application/json",
+                "accept": "application/json, text/event-stream",
+            },
+        )
+        return await self._probe_jsonrpc_result(endpoint_cfg.url, payload, headers, timeout)
 
     async def _probe_jsonrpc_result(
         self,
@@ -437,16 +480,22 @@ class ProcessManager:
         timeout: float,
     ) -> bool:
         try:
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(timeout),
-                follow_redirects=False,
-            ) as client:
-                response = await client.post(url, json=payload, headers=headers)
-        except (httpx.HTTPError, OSError, RuntimeError, ValueError):
+            async with asyncio.timeout(timeout):
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(timeout),
+                    follow_redirects=False,
+                ) as client:
+                    async with client.stream(
+                        "POST",
+                        url,
+                        json=payload,
+                        headers=headers,
+                    ) as response:
+                        if not 200 <= response.status_code < 300:
+                            return False
+                        response_payload = await self._extract_jsonrpc_payload(response)
+        except (TimeoutError, httpx.HTTPError, OSError, RuntimeError, ValueError):
             return False
-        if not 200 <= response.status_code < 300:
-            return False
-        response_payload = self._extract_jsonrpc_payload(response)
         return (
             isinstance(response_payload, dict)
             and response_payload.get("jsonrpc") == "2.0"
@@ -455,27 +504,32 @@ class ProcessManager:
         )
 
     @staticmethod
-    def _extract_jsonrpc_payload(response: httpx.Response) -> object | None:
+    async def _extract_jsonrpc_payload(response: httpx.Response) -> object | None:
         content_type = response.headers.get("content-type", "").casefold()
         if "event-stream" not in content_type:
             try:
+                await response.aread()
                 return response.json()
             except ValueError:
                 return None
 
+        import json
+
         data_lines: list[str] = []
-        for line in response.text.splitlines():
+        async for line in response.aiter_lines():
             if not line:
-                if data_lines:
-                    break
-                continue
+                if not data_lines:
+                    continue
+                try:
+                    return json.loads("\n".join(data_lines))
+                except ValueError:
+                    data_lines.clear()
+                    continue
             if line.startswith("data:"):
                 data_lines.append(line[5:].lstrip())
         if not data_lines:
             return None
         try:
-            import json
-
             return json.loads("\n".join(data_lines))
         except ValueError:
             return None
