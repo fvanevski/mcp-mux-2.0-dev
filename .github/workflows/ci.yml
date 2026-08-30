@@ -137,6 +137,26 @@ jobs:
           uv run python main.py --host 127.0.0.1 --port 8012 > /tmp/mcp-mux.log 2>&1 &
           echo $! > /tmp/mcp-mux.pid
           timeout 30 bash -c 'until curl -fsS http://127.0.0.1:8012/summary >/dev/null; do sleep 0.5; done'
+      - name: Diagnose server-stateless conformance failure
+        continue-on-error: true
+        run: >-
+          npx --yes @modelcontextprotocol/conformance@0.2.0-alpha.11
+          server
+          --url http://127.0.0.1:8012/conformance
+          --scenario server-stateless
+          --spec-version 2026-07-28
+          --force
+          --verbose
+      - name: Diagnose DNS rebinding conformance failure
+        continue-on-error: true
+        run: >-
+          npx --yes @modelcontextprotocol/conformance@0.2.0-alpha.11
+          server
+          --url http://127.0.0.1:8012/conformance
+          --scenario dns-rebinding-protection
+          --spec-version 2026-07-28
+          --force
+          --verbose
       - name: Run official MCP conformance suite through mux
         run: >-
           npx --yes @modelcontextprotocol/conformance@0.2.0-alpha.11
