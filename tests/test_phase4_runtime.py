@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import signal
+import socket
+import sys
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,6 +19,12 @@ from mcp_router.core.config_loader import ManagedEndpointConfig, RouterConfig
 from mcp_router.core.process_manager import ProcessManager
 from mcp_router.core.runtime import EndpointRuntime, RuntimeState
 from mcp_router.server import MCPRouter
+
+
+def _find_unused_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 def managed_config(
@@ -325,6 +334,37 @@ async def test_concurrent_first_requests_spawn_only_one_process() -> None:
 
     with patch("os.killpg", side_effect=lambda *_: process_exit.set()):
         await manager.stop_managed_server(runtime)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_leaves_no_real_managed_subprocess_alive() -> None:
+    manager = ProcessManager()
+    port = _find_unused_loopback_port()
+    fixture = Path(__file__).parent / "fixtures" / "managed_mcp_server.py"
+    endpoint = ManagedEndpointConfig(
+        path="managed-integration",
+        mode="managed_cli",
+        argv=[sys.executable, str(fixture), str(port)],
+        url=f"http://127.0.0.1:{port}/mcp",
+        summary="Disposable managed MCP integration fixture",
+        readiness={"timeout": 5.0, "interval": 0.05},
+    )
+    runtime = EndpointRuntime.from_config(endpoint)
+    process = None
+
+    try:
+        await manager.start_managed_server(runtime)
+        process = runtime.process
+        assert process is not None
+        assert process.returncode is None
+        assert runtime.state is RuntimeState.RUNNING
+    finally:
+        await manager.cleanup([runtime])
+
+    assert process is not None
+    assert process.returncode is not None
+    assert runtime.process is None
+    assert runtime.state is RuntimeState.STOPPED
 
 
 @pytest.mark.asyncio
