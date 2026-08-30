@@ -206,6 +206,58 @@ async def test_authenticated_gateway_consumes_caller_key_and_injects_upstream_ke
     assert "gateway-secret" not in repr(upstream_headers)
 
 
+def test_short_configured_secret_is_redacted() -> None:
+    redactor = SecretRedactor(["xy"])
+    assert redactor.active
+    assert redactor.redact("credential=xy") == "credential=[REDACTED]"
+
+
+class SplitTextStreamResponse:
+    status_code = 200
+    headers = httpx.Headers({"content-type": "text/plain; charset=utf-8"})
+
+    async def aiter_text(self) -> AsyncIterator[str]:
+        yield "prefix upstream-"
+        yield "secret suffix"
+
+
+@pytest.mark.asyncio
+async def test_text_stream_redaction_handles_secret_split_across_chunks() -> None:
+    isolated = MCPRouter(Starlette(), "/tmp/not-used.yaml")
+    isolated.apply_configuration(
+        RouterConfig.model_validate(
+            {
+                "endpoints": [
+                    {
+                        "path": "example",
+                        "mode": "remote",
+                        "url": "https://upstream.test/mcp",
+                        "summary": "Example",
+                        "headers": {"Authorization": "Bearer upstream-secret"},
+                    }
+                ]
+            }
+        )
+    )
+    stream_context = MagicMock()
+    stream_context.__aenter__ = AsyncMock(return_value=SplitTextStreamResponse())
+    stream_context.__aexit__ = AsyncMock(return_value=None)
+    isolated._http_client, _ = fake_client_for(stream_context)
+
+    request = direct_request(
+        body={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+        headers={"content-type": "application/json"},
+    )
+    response = await isolated.catch_all_proxy(request)
+
+    assert isinstance(response, StreamingResponse)
+    chunks = [chunk async for chunk in cast(AsyncIterator[bytes], response.body_iterator)]
+    body = b"".join(chunks).decode("utf-8")
+    assert "upstream-secret" not in body
+    assert "[REDACTED]" in body
+    assert body == "prefix [REDACTED] suffix"
+
+
 @pytest.mark.asyncio
 async def test_trusted_proxy_identity_requires_trusted_immediate_peer() -> None:
     app = Starlette()

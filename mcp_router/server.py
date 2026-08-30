@@ -760,20 +760,34 @@ class MCPRouter:
             response_headers["Cache-Control"] = "private, no-store"
 
         async def content_generator() -> AsyncIterator[bytes]:
-            iterator = response.aiter_bytes().__aiter__()
             try:
-                while True:
-                    try:
-                        chunk = await asyncio.wait_for(
-                            anext(iterator),
-                            timeout=endpoint.upstream_timeout,
-                        )
-                    except StopAsyncIteration:
-                        break
-                    if textual_response and self._redactor.active:
-                        text = chunk.decode("utf-8", errors="replace")
-                        yield self._redactor.redact(text).encode("utf-8")
-                    else:
+                if textual_response and self._redactor.active:
+                    iterator = response.aiter_text().__aiter__()
+                    stream_redactor = self._redactor.stream()
+                    while True:
+                        try:
+                            text = await asyncio.wait_for(
+                                anext(iterator),
+                                timeout=endpoint.upstream_timeout,
+                            )
+                        except StopAsyncIteration:
+                            break
+                        redacted = stream_redactor.feed(text)
+                        if redacted:
+                            yield redacted.encode("utf-8")
+                    tail = stream_redactor.finish()
+                    if tail:
+                        yield tail.encode("utf-8")
+                else:
+                    iterator_bytes = response.aiter_bytes().__aiter__()
+                    while True:
+                        try:
+                            chunk = await asyncio.wait_for(
+                                anext(iterator_bytes),
+                                timeout=endpoint.upstream_timeout,
+                            )
+                        except StopAsyncIteration:
+                            break
                         yield chunk
             finally:
                 await stream_context.__aexit__(None, None, None)
