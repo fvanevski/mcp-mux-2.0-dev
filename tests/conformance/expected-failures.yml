@@ -1,0 +1,11 @@
+# mcp-mux terminates unsupported protocol versions before proxying to the
+# upstream fixture. The companion HTTP conformance check verifies the wire
+# contract: HTTP 400, JSON-RPC -32022, and data.supportedVersions.
+#
+# This referee check additionally correlates that response with fixture-internal
+# active-server metrics, which are undefined because the request is intentionally
+# intercepted at the gateway. Keep this baseline scoped to this single check so
+# any new failure, or a referee correction that makes this check pass, fails CI.
+server:
+  - server-stateless:sep-2575-server-unsupported-version-error
+client: []
