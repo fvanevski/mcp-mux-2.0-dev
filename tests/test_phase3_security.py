@@ -13,7 +13,12 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 
-from mcp_router.core.config_loader import EndpointConfig, RouterConfig, SecurityConfig
+from mcp_router.core.config_loader import (
+    ConfigWatcher,
+    EndpointConfig,
+    RouterConfig,
+    SecurityConfig,
+)
 from mcp_router.core.limits import RequestLimiter
 from mcp_router.core.process_manager import ProcessManager
 from mcp_router.core.protocol import (
@@ -173,6 +178,7 @@ async def test_authenticated_gateway_consumes_caller_key_and_injects_upstream_ke
             "digest": "sha-256=stale",
             "content-length": "999",
             "set-cookie": "upstream_session=opaque-upstream-cookie; HttpOnly",
+            "x-debug-credential": "Bearer upstream-secret",
         },
     )
     isolated._http_client, fake_client = fake_client_for(stream_context)
@@ -198,6 +204,7 @@ async def test_authenticated_gateway_consumes_caller_key_and_injects_upstream_ke
     assert accepted.headers.get("etag") is None
     assert accepted.headers.get("digest") is None
     assert accepted.headers.get("set-cookie") is None
+    assert accepted.headers.get("x-debug-credential") is None
     assert accepted.headers["cache-control"] == "private, no-store"
 
     upstream_headers = fake_client.stream.call_args.kwargs["headers"]
@@ -210,6 +217,62 @@ def test_short_configured_secret_is_redacted() -> None:
     redactor = SecretRedactor(["xy"])
     assert redactor.active
     assert redactor.redact("credential=xy") == "credential=[REDACTED]"
+
+
+@pytest.mark.asyncio
+async def test_json_response_secret_like_text_preserves_json_framing() -> None:
+    isolated = MCPRouter(Starlette(), "/tmp/not-used.yaml")
+    isolated._configs = {
+        "example": EndpointConfig(
+            path="example",
+            mode="remote",
+            url="https://upstream.test/mcp",
+            summary="Example",
+        )
+    }
+    _, stream_context = json_upstream_response(
+        b'{"jsonrpc":"2.0","id":1,"result":{"text":"token=abc and more","other":1}}'
+    )
+    isolated._http_client, _ = fake_client_for(stream_context)
+
+    response = await isolated.catch_all_proxy(
+        direct_request(
+            body={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+            headers={"content-type": "application/json"},
+        )
+    )
+
+    payload = json.loads(bytes(response.body))
+    assert payload["result"] == {"text": "token=abc and more", "other": 1}
+
+
+@pytest.mark.asyncio
+async def test_rejected_config_does_not_log_candidate_secret(
+    tmp_path: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    config_path = tmp_path / "router.yaml"
+    config_path.write_text(
+        """
+endpoints:
+  - path: example
+    mode: remote
+    url: https://upstream.test/mcp
+    summary: Example
+    headers:
+      Authorization: Bearer rejected-upstream-secret
+    allowed_tools: [safe]
+    denied_tools: [hidden]
+""".lstrip(),
+        encoding="utf-8",
+    )
+    caplog.set_level(logging.ERROR)
+    watcher = ConfigWatcher(str(config_path), MagicMock())
+
+    reloaded = await watcher._reload_if_changed()
+
+    assert not reloaded
+    assert "rejected-upstream-secret" not in caplog.text
 
 
 class SplitTextStreamResponse:
@@ -355,6 +418,108 @@ async def test_denied_legacy_tool_call_uses_body_policy_and_never_reaches_upstre
     assert response.status_code == 403
     assert json.loads(bytes(response.body))["error"]["code"] == CAPABILITY_DENIED
     fake_client.stream.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["resources/subscribe", "resources/unsubscribe"])
+async def test_denied_legacy_resource_subscription_never_reaches_upstream(method: str) -> None:
+    isolated = MCPRouter(Starlette(), "/tmp/not-used.yaml")
+    isolated._configs = {
+        "example": EndpointConfig(
+            path="example",
+            mode="remote",
+            url="https://upstream.test/mcp",
+            summary="Example",
+            denied_resources=["file:///secret"],
+        )
+    }
+    fake_client = MagicMock()
+    fake_client.is_closed = False
+    fake_client.stream = MagicMock()
+    isolated._http_client = cast(httpx.AsyncClient, fake_client)
+
+    response = await isolated.catch_all_proxy(
+        direct_request(
+            body={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": method,
+                "params": {"uri": "file:///secret"},
+            },
+            headers={"content-type": "application/json"},
+        )
+    )
+
+    assert response.status_code == 403
+    assert json.loads(bytes(response.body))["error"]["code"] == CAPABILITY_DENIED
+    fake_client.stream.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_modern_resource_subscription_policy_checks_every_requested_uri() -> None:
+    isolated = MCPRouter(Starlette(), "/tmp/not-used.yaml")
+    isolated._configs = {
+        "example": EndpointConfig(
+            path="example",
+            mode="remote",
+            url="https://upstream.test/mcp",
+            summary="Example",
+            allowed_resources=["file:///allowed"],
+        )
+    }
+    fake_client = MagicMock()
+    fake_client.is_closed = False
+    fake_client.stream = MagicMock()
+    isolated._http_client = cast(httpx.AsyncClient, fake_client)
+
+    response = await isolated.catch_all_proxy(
+        direct_request(
+            body=modern_body(
+                "subscriptions/listen",
+                {
+                    "notifications": {
+                        "resourceSubscriptions": ["file:///allowed", "file:///hidden"]
+                    }
+                },
+            ),
+            headers=modern_headers("subscriptions/listen"),
+        )
+    )
+
+    assert response.status_code == 403
+    assert json.loads(bytes(response.body))["error"]["code"] == CAPABILITY_DENIED
+    fake_client.stream.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_modern_allowed_resource_subscription_reaches_upstream() -> None:
+    isolated = MCPRouter(Starlette(), "/tmp/not-used.yaml")
+    isolated._configs = {
+        "example": EndpointConfig(
+            path="example",
+            mode="remote",
+            url="https://upstream.test/mcp",
+            summary="Example",
+            allowed_resources=["file:///allowed"],
+        )
+    }
+    _, stream_context = json_upstream_response(
+        b'{"jsonrpc":"2.0","id":1,"result":{}}'
+    )
+    isolated._http_client, fake_client = fake_client_for(stream_context)
+
+    response = await isolated.catch_all_proxy(
+        direct_request(
+            body=modern_body(
+                "subscriptions/listen",
+                {"notifications": {"resourceSubscriptions": ["file:///allowed"]}},
+            ),
+            headers=modern_headers("subscriptions/listen"),
+        )
+    )
+
+    assert response.status_code == 200
+    assert fake_client.stream.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -594,6 +759,40 @@ async def test_endpoint_and_tool_concurrency_limits_release_cleanly() -> None:
     assert duplicate_tool_rejection.scope == "tool:tool-limited:expensive"
 
     await tool_lease.release()
+
+
+@pytest.mark.asyncio
+async def test_concurrency_lease_released_when_buffered_upstream_read_fails() -> None:
+    isolated = MCPRouter(Starlette(), "/tmp/not-used.yaml")
+    endpoint = EndpointConfig(
+        path="example",
+        mode="remote",
+        url="https://upstream.test/mcp",
+        summary="Example",
+        limits={"max_concurrent": 1},
+    )
+    isolated._configs = {"example": endpoint}
+    response, stream_context = json_upstream_response(b"unused")
+    response.aread = AsyncMock(
+        side_effect=httpx.ReadError(
+            "read failed",
+            request=httpx.Request("POST", "https://upstream.test/mcp"),
+        )
+    )
+    isolated._http_client, _ = fake_client_for(stream_context)
+
+    with pytest.raises(httpx.ReadError, match="read failed"):
+        await isolated.catch_all_proxy(
+            direct_request(
+                body={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+                headers={"content-type": "application/json"},
+            )
+        )
+
+    reacquired_lease, reacquired_rejection = await isolated._limiter.acquire(endpoint)
+    assert reacquired_lease is not None
+    assert reacquired_rejection is None
+    await reacquired_lease.release()
 
 
 @pytest.mark.asyncio
