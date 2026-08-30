@@ -88,9 +88,10 @@ class CapabilityPolicy:
         denied_names: frozenset[str] | None = None
         if method == "tools/call":
             allowed_names, denied_names = self.allowed_tools, self.denied_tools
-        elif method in {"resources/read", "resources/subscribe", "resources/unsubscribe"}:
-            allowed_names, denied_names = self.allowed_resources, self.denied_resources
-        elif method == "subscriptions/listen" and name is not None:
+        elif (
+            method in {"resources/read", "resources/subscribe", "resources/unsubscribe"}
+            or method == "subscriptions/listen" and name is not None
+        ):
             allowed_names, denied_names = self.allowed_resources, self.denied_resources
         elif method == "prompts/get":
             allowed_names, denied_names = self.allowed_prompts, self.denied_prompts
