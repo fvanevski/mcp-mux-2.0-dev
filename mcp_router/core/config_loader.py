@@ -100,6 +100,16 @@ def _validate_http_url(value: str) -> str:
     return candidate
 
 
+def _is_loopback_host(host: str) -> bool:
+    normalized = host.rstrip(".").casefold()
+    if normalized == "localhost" or normalized.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
 def _validate_optional_text(value: str | None, field_name: str) -> str | None:
     if value is None:
         return None
@@ -390,6 +400,21 @@ class RemoteEndpointConfig(EndpointBase):
     mode: Literal["remote"]
 
 
+class ManagedRestartConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    enabled: bool = False
+    max_attempts: int = Field(default=3, ge=1, le=100)
+    initial_backoff: float = Field(default=0.5, gt=0)
+    max_backoff: float = Field(default=10.0, gt=0)
+
+    @model_validator(mode="after")
+    def validate_backoff_bounds(self) -> ManagedRestartConfig:
+        if self.max_backoff < self.initial_backoff:
+            raise ValueError("restart.max_backoff must be greater than or equal to initial_backoff")
+        return self
+
+
 class ManagedReadinessConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
@@ -397,6 +422,7 @@ class ManagedReadinessConfig(BaseModel):
     port: int | None = Field(default=None, ge=1, le=65535)
     timeout: float = Field(default=15.0, gt=0)
     interval: float = Field(default=0.2, gt=0)
+    legacy_initialize_fallback: bool = False
 
     @field_validator("host")
     @classmethod
@@ -412,7 +438,9 @@ class ManagedEndpointConfig(EndpointBase):
     env: dict[str, str] = Field(default_factory=dict)
     cwd: str | None = None
     readiness: ManagedReadinessConfig = Field(default_factory=ManagedReadinessConfig)
+    restart: ManagedRestartConfig = Field(default_factory=ManagedRestartConfig)
     unsafe_shell_command: str | None = None
+    allow_non_loopback_target: bool = False
 
     @field_validator("argv")
     @classmethod
@@ -457,8 +485,15 @@ class ManagedEndpointConfig(EndpointBase):
             raise ValueError("managed_cli requires exactly one of argv or unsafe_shell_command")
 
         parsed = urlsplit(self.url)
+        target_host = parsed.hostname
+        if target_host is None:
+            raise ValueError("managed endpoint url must include a target host")
+        if not self.allow_non_loopback_target and not _is_loopback_host(target_host):
+            raise ValueError(
+                "managed endpoint url must target loopback unless allow_non_loopback_target is true"
+            )
         if self.readiness.host is None:
-            self.readiness.host = parsed.hostname
+            self.readiness.host = target_host
         if self.readiness.port is None:
             self.readiness.port = parsed.port or (443 if parsed.scheme == "https" else 80)
         return self
