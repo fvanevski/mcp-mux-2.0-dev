@@ -81,13 +81,22 @@ jobs:
       - uses: astral-sh/setup-uv@v7.1.2
         with:
           python-version: "3.13"
-      - name: Generate secure cryptography lock
-        run: uv lock --upgrade-package cryptography
-      - name: Upload resolver-generated lock
+      - name: Generate secure cryptography lock block
+        run: |
+          uv lock --upgrade-package cryptography
+          python - <<'PY'
+          from pathlib import Path
+
+          text = Path("uv.lock").read_text()
+          start = text.index('[[package]]\nname = "cryptography"')
+          end = text.index("\n[[package]]", start + 1)
+          Path("/tmp/cryptography.block").write_text(text[start:end])
+          PY
+      - name: Upload resolver-generated cryptography block
         uses: actions/upload-artifact@v4
         with:
-          name: phase6-secure-uv-lock
-          path: uv.lock
+          name: phase6-secure-cryptography-block
+          path: /tmp/cryptography.block
           if-no-files-found: error
 
   conformance:
@@ -95,19 +104,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout official Python MCP SDK 2.1.1 fixture
+        uses: actions/checkout@v4
+        with:
+          repository: modelcontextprotocol/python-sdk
+          ref: 0921d94a74db900dccd2d534842aa7b6160542d2
+          path: .conformance/python-sdk
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
       - uses: astral-sh/setup-uv@v7.1.2
         with:
           python-version: "3.13"
       - name: Sync project
         run: uv sync --frozen --all-groups
-      - name: Start official Everything server
+      - name: Sync official Python SDK Everything server
+        working-directory: .conformance/python-sdk
+        run: uv sync --frozen --all-extras --package mcp-everything-server
+      - name: Start official Python SDK Everything server
+        working-directory: .conformance/python-sdk
         env:
           PORT: "3001"
         run: |
-          npx --yes @modelcontextprotocol/server-everything@2026.8.18 streamableHttp > /tmp/everything.log 2>&1 &
+          uv run --frozen mcp-everything-server --port "$PORT" > /tmp/everything.log 2>&1 &
           echo $! > /tmp/everything.pid
           timeout 30 bash -c 'until curl -sS -o /dev/null http://127.0.0.1:3001/mcp; do sleep 0.5; done'
       - name: Start mux proxy
