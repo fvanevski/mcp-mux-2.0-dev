@@ -5,17 +5,17 @@
 | Field                        | Value                                                                                                             |
 | ---------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | Product                      | `mcp-mux`                                                                                                         |
-| Repository                   | `fvanevski/mcp-mux`                                                                                               |
+| Repository                   | `fvanevski/mcp-mux-2.0-dev`                                                                                       |
 | Target release               | `v0.2.0`                                                                                                          |
-| Document status              | Implementation PRD                                                                                                |
+| Document status              | Implementation PRD; planning/reference authority subject to merged repository contracts                           |
 | Primary audience             | Coding AI agent, code reviewer, repository maintainer                                                             |
 | Parent epic                  | GitHub issue #1                                                                                                   |
 | Release tracker              | GitHub issue #2                                                                                                   |
 | Phase issues                 | #3–#9                                                                                                             |
 | Quality gates                | #10–#13                                                                                                           |
-| Current default branch       | `master`                                                                                                          |
+| Current default branch       | `main`                                                                                                            |
 | Architectural style          | Endpoint-per-upstream ASGI gateway and managed-process orchestrator                                               |
-| Last reviewed implementation | Current `master` architecture represented by `MCPRouter`, `EndpointConfig`, `ConfigWatcher`, and `ProcessManager` |
+| Last synchronized implementation | `main@bb369027a1ae175e4d9e51ea500c060a07a0bfc1` after merged Phase 2 / Issue #5                               |
 
 ## 2. Executive summary
 
@@ -105,38 +105,32 @@ The implementation agent must be able to work one phase at a time, map every cha
 When sources conflict, use this order:
 
 1. **Applicable final MCP specification and official SDK documentation** for protocol requirements.
-2. **This PRD** for product architecture, scope, security invariants, and sequencing.
-3. **GitHub phase and gate issues** for phase-specific deliverables and closure evidence.
-4. **Approved ADRs and compatibility matrix** created in Phase 0.
-5. **Tests** for accepted behavior.
-6. **Existing implementation and README** only as evidence of current behavior, not proof that the behavior is correct.
+2. **Current governing GitHub phase/gate issues and merged repository contracts** (`docs/architecture/ADR-001-endpoint-gateway.md`, `docs/compatibility-matrix.md`, `docs/validation.md`, and `docs/configuration.md`) for implemented scope, closure evidence, compatibility, and validation authority.
+3. **This PRD** for product architecture, remaining scope, security invariants, and sequencing where it does not conflict with a more current merged contract or issue decision.
+4. **Tests** for accepted implemented behavior.
+5. **Existing implementation and README** as evidence of current behavior, with merged implementation taking precedence over historical planning prose.
+
+This document originated before several phases were implemented. Historical current-state descriptions, suggested branch names, CI targets, and coding-agent operating instructions below are planning context unless reaffirmed by a current governing issue or merged repository contract. In particular, `docs/validation.md` governs the current Central/local-agent validation workflow.
 
 The implementation agent must not preserve existing behavior merely because a current test asserts it. Tests that encode intentional protocol repair, insecure behavior, or invalid semantics must be replaced as part of the phase that changes the governing requirement.
 
 ## 4.1 External SDK-version checkpoint
 
-**UNVERIFIED implementation dependency:** the exact stable Python MCP SDK v2 release available at implementation time.
+**RESOLVED in Phase 1 / Gate A.** The repository now declares `mcp>=2,<3`, and the authoritative lockfile resolves `mcp==2.1.1`. Issue #4 and Gate A (#10) were closed with exact-head CI, deterministic host assessment, and merged-main evidence.
 
-Current official sources are temporarily inconsistent: the Python SDK v1 documentation says v2 is the current stable line, while the indexed PyPI project information still shows `1.28.1` as the stable release and `2.0.0b2` as the latest listed prerelease.
+Future dependency work must treat the committed `pyproject.toml`, `uv.lock`, governing issue, and current validation contract as authority rather than re-running this historical checkpoint unless a later issue explicitly requires an SDK transition.
 
-Therefore:
-
-- Do not blindly commit the provisional `mcp>=2,<3` constraint from issue #4.
-- At the beginning of Phase 1, query the official package index and inspect the official SDK release page.
-- If stable `2.x` exists, use a bounded stable constraint and commit the resolved lockfile.
-- If only a prerelease exists, pin the exact official prerelease on a dedicated migration branch.
-- Do not declare Gate A complete or prepare `v0.2.0` for production while relying on an unreviewed moving prerelease.
-- Record the selected SDK version and evidence in the Phase 1 PR and Gate A issue.
-
-This checkpoint clarifies, but does not change, the Phase 1 objective of moving the codebase to the official MCP SDK v2 architecture.
+This resolved checkpoint preserves the original Phase 1 intent while preventing stale prerelease guidance from overriding the merged dependency state.
 
 ---
 
-# 5. Current-state architecture
+# 5. Baseline architecture at refactor start (historical)
+
+This section describes the pre-refactor baseline that motivated the phase plan. It is retained for provenance, not as a description of the current merged implementation. For current behavior, use the merged source plus the repository contracts identified in Section 4.
 
 ## 5.1 Runtime topology
 
-The current runtime is:
+The baseline runtime was:
 
 ```text
 main.py
@@ -1729,7 +1723,9 @@ Gate issues must link the final successful check run.
 
 ---
 
-# 18. Coding-agent operating instructions
+# 18. Historical coding-agent operating instructions
+
+The instructions in this section capture the original implementation-plan workflow. They are non-authoritative where they conflict with the repository's current Central/local-agent workflow, exact-head evidence requirements, or `docs/validation.md`.
 
 ## 18.1 Before editing
 
