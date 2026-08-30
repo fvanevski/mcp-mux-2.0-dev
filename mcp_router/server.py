@@ -832,7 +832,8 @@ class MCPRouter:
 
     async def catch_all_proxy(self, request: Request) -> Response:
         path_prefix = request.path_params.get("path_prefix")
-        scope = request.scope
+        request_scope = getattr(request, "scope", None)
+        scope: dict[str, object] = request_scope if isinstance(request_scope, dict) else {}
         if isinstance(path_prefix, str):
             scope["mcp.endpoint"] = path_prefix
         if not path_prefix or path_prefix not in self._runtimes:

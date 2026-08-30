@@ -3,7 +3,6 @@ from __future__ import annotations
 import pytest
 
 from mcp_router.core.config_loader import (
-    EndpointConfig,
     ManagedEndpointConfig,
     RouterConfig,
     expand_env_vars,

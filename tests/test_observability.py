@@ -105,7 +105,7 @@ async def test_structured_request_log_contains_operational_fields_without_payloa
     rendered = "\n".join(item.message for item in caplog.records)
     assert secret not in rendered
     assert "caller-secret-value" not in rendered
-    assert "\"params\"" not in record
+    assert "params" not in record
 
 
 @pytest.mark.asyncio
