@@ -18,7 +18,8 @@
 - 🛡️ **Session Propagation & Isolation**: For explicitly enabled legacy bridge sessions, maps upstream `Mcp-Session-Id` values to endpoint-owned local sessions, rejects cross-endpoint reuse, and deterministically cleans up expired/disconnected sessions and owned upstream work.
 - 🤝 **Strict Streamable HTTP Client Compatibility**: Normalizes required upstream transport headers while rejecting malformed JSON-RPC and modern protocol/header mismatches rather than repairing invalid request bodies.
 - 🧼 **Decoded Response Header Safety**: Strips stale `Content-Encoding` and upstream `Content-Length` headers when the router reads and rebuilds JSON responses.
-- 📊 **Operational Summary Endpoint**: `/summary` exposes endpoint/runtime state plus bounded legacy-adapter utilization and failure counters without importing the adapter on ordinary modern traffic.
+- 📊 **Operational Visibility**: `/summary` exposes endpoint descriptions plus runtime/counter state, while `/metrics` provides focused endpoint state, lease, restart, cancellation, policy-denial, upstream-error, and legacy-bridge counters.
+- 🔎 **Structured Request Diagnostics**: Payload-free JSON logs include request ID, endpoint, protocol revision, method, named capability, result status, duration, bytes streamed, policy outcome, and cancellation state. `X-Request-Id` is returned downstream and supported W3C trace context is propagated upstream without logging raw trace values.
 - 🧹 **Clean Subprocess Lifecycle**: The manager isolates background subprocesses inside unique Unix process groups (`os.setsid`) to guarantee no zombie processes are left behind on teardown.
 
 ---
@@ -34,7 +35,8 @@ graph TD
     A --> F[server.py - MCPRouter]
     F -->|Proxy SSE| G[Remote SSE Servers]
     F -->|Proxy Streamable HTTP| H[Streamable HTTP Servers]
-    A --> I[summary route]
+    A --> I[summary + metrics routes]
+    F --> J[structured request observability]
 ```
 
 Normative refactor contracts are maintained in:
@@ -42,7 +44,11 @@ Normative refactor contracts are maintained in:
 - `docs/architecture/ADR-001-endpoint-gateway.md` — source-derived architecture and target endpoint boundary;
 - `docs/compatibility-matrix.md` — current/target/legacy claims and named compatibility scenarios;
 - `docs/validation.md` — deterministic CI/local-assessment authority and evidence contract;
-- `docs/configuration.md` — validated endpoint schema and migration contract.
+- `docs/configuration.md` — validated endpoint schema and migration contract;
+- `docs/threat-model.md` — security assets, trust boundaries, controls, and residual risk;
+- `docs/deployment-hardening.md` — production exposure, secret, process, and validation guidance;
+- `docs/migration-v0.1-to-v0.2.md` — complete intentional breaking-change checklist for v0.2.0;
+- `docs/release-notes-v0.2.0.md` — release scope and evidence boundary.
 
 These files, together with the governing GitHub issues, supersede historical README prose when a refactor contract is more specific.
 
@@ -188,10 +194,10 @@ curl http://127.0.0.1:8012/summary
 
 ## 🧪 Testing
 
-The project is fully tested using `pytest` and `pytest-asyncio`. To execute unit tests:
+The project uses focused configuration, protocol, policy, proxy, streaming, process, reload, security, compatibility, and lifecycle suites. To execute the complete local test corpus:
 
 ```bash
 uv run pytest
 ```
 
-Validation authority and exact commands are documented in `docs/validation.md`. Use current exact-head CI/runner evidence rather than a hard-coded historical pass count.
+Validation authority and exact commands are documented in `docs/validation.md`. Pull requests are expected to pass Python 3.13/3.14 quality, unit, and integration jobs plus dependency audit and official MCP `2026-07-28` conformance. Use current exact-head CI/runner evidence rather than a hard-coded historical pass count.

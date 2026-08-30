@@ -179,7 +179,7 @@ The fixture remains the deterministic oracle for a correct modern peer. Phase 2 
 | `legacy-sessionful` | Returns a deterministic session ID from `initialize` and requires it on later legacy requests. |
 | `legacy-http-sse` | Emits a deterministic endpoint event and accepts the corresponding legacy message POST. |
 
-These fixtures make no live network calls and are compatibility oracles, not substitutes for the official MCP conformance suite planned for Phase 6.
+These fixtures make no live network calls and remain deterministic compatibility oracles. Phase 6 supplements them with the official MCP conformance runner against an official Everything server proxied through the mux; conformance does not replace the fixture-level negative and compatibility regressions.
 
 ## Preservation invariants
 
@@ -241,6 +241,6 @@ Tests that encode a behavior being intentionally broken must be reclassified alo
 - `mcp_router/core/config_loader.py`
 - `mcp_router/core/process_manager.py`
 - `mcp_router/config.yaml`
-- `tests/test_router.py`
+- `tests/test_configuration.py`, `tests/test_policy.py`, `tests/test_proxy.py`, `tests/test_streaming.py`, `tests/test_process.py`, and `tests/test_reload.py`
 - `tests/test_compatibility_baseline.py`
 - `tests/fixtures/mock_upstream.py`

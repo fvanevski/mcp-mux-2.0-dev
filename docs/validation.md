@@ -8,7 +8,21 @@ The repository-sanctioned local assessment entry point is:
 
 It is a non-mutating host-evidence runner. It does not fetch refs, install dependencies, modify GitHub state, approve a pull request, merge, close an issue, or make a gate decision.
 
-Phase 0 introduces this runner and the minimal CI ratchet as an **intentional validation-control transition** authorized on Issue #3. This narrow bootstrap does not replace Phase 6 (#9), which still owns the final Python-version matrix, dependency auditing, conformance, required merge checks, and release-hardening validation.
+Phase 0 introduced this runner and the initial CI ratchet as an **intentional validation-control transition** authorized on Issue #3. Phase 6 (#9) retains that exact-SHA host-evidence contract and adds the release-hardening CI authority described below; CI does not replace the local assessment runner, and the runner does not replace CI.
+
+## Phase 6 pull-request CI
+
+`.github/workflows/ci.yml` defines the merge-visible release-hardening checks:
+
+- `Quality (Python 3.13)` and `Quality (Python 3.14)`: pinned Ruff plus Pyrefly;
+- `Unit tests (Python 3.13)` and `Unit tests (Python 3.14)`: the non-integration regression corpus;
+- `Integration tests (Python 3.13)` and `Integration tests (Python 3.14)`: compatibility, legacy lifecycle, and observability integration coverage;
+- `Dependency audit`: locked runtime dependencies audited with `pip-audit 2.10.1`;
+- `MCP conformance (2026-07-28)`: official `@modelcontextprotocol/conformance@0.1.16` run through the mux against pinned official `@modelcontextprotocol/server-everything@2.0.0`.
+
+The supported Python MCP SDK line is current stable v2; the v0.2.0 manifest requires `mcp>=2.1.1,<3`, with the release lock resolving `2.1.1`.
+
+All named CI checks are expected to complete successfully on the exact PR head before merge disposition. Repository/branch protection configuration is a GitHub governance control; workflow success alone does not grant merge authorization.
 
 ## Authority inputs
 
