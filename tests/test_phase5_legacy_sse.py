@@ -78,7 +78,7 @@ def _request(
 async def _open_bridge(
     router: MCPRouter,
     path_prefix: str,
-) -> tuple[LegacySSEBridge, BridgeSession, AsyncGenerator[bytes, None]]:
+) -> tuple[LegacySSEBridge, BridgeSession, AsyncGenerator[bytes]]:
     response = await router.catch_all_proxy(
         _request(
             "GET",
@@ -94,7 +94,7 @@ async def _open_bridge(
         for session in bridge.sessions.values()
         if session.path_prefix == path_prefix
     )
-    iterator = cast(AsyncGenerator[bytes, None], response.body_iterator)
+    iterator = cast(AsyncGenerator[bytes], response.body_iterator)
     endpoint_event = await anext(iterator)
     assert f"/{path_prefix}?session_id={session.session_id}".encode() in endpoint_event
     return bridge, session, iterator
