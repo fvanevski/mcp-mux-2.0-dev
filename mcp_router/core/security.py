@@ -52,7 +52,6 @@ _DEFAULT_UPSTREAM_REQUEST_HEADERS = {
 _SENSITIVE_RESPONSE_HEADERS = {
     "authorization",
     "proxy-authorization",
-    "set-cookie",
 }
 
 
@@ -115,12 +114,16 @@ def sanitize_response_headers(
     if body_was_transformed:
         skipped.update(
             {
+                "content-encoding",
+                "content-length",
                 "etag",
                 "digest",
                 "content-digest",
                 "repr-digest",
                 "content-md5",
                 "last-modified",
+                "expires",
+                "age",
             }
         )
     return {key: value for key, value in headers.items() if key.casefold() not in skipped}

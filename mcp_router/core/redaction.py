@@ -23,6 +23,10 @@ class SecretRedactor:
                 expanded.add(token.strip())
         self._values = tuple(sorted(expanded, key=len, reverse=True))
 
+    @property
+    def active(self) -> bool:
+        return bool(self._values)
+
     @classmethod
     def from_router_config(cls, config: RouterConfig) -> SecretRedactor:
         values: list[str] = []

@@ -61,6 +61,9 @@ class RequestLimiter:
                 for key, spec in specs
                 if spec.max_concurrent is not None or spec.requests_per_minute is not None
             ]
+            if not active_specs:
+                return None, None
+
             for key, spec in active_specs:
                 bucket = self._buckets.setdefault(key, _Bucket())
                 cutoff = now - 60.0
