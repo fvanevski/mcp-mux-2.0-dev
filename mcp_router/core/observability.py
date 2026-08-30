@@ -23,7 +23,7 @@ _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 def _header(scope: Mapping[str, Any], name: str) -> str | None:
     target = name.casefold().encode("latin-1")
     for key, value in scope.get("headers", []):
-        if key.casefold() == target:
+        if key.lower() == target:
             return value.decode("latin-1")
     return None
 
@@ -90,7 +90,7 @@ class GatewayObservabilityMiddleware:
             if message_type == "http.response.start":
                 status_code = int(message.get("status", 500))
                 raw_headers = list(message.get("headers", []))
-                if not any(key.casefold() == b"x-request-id" for key, _ in raw_headers):
+                if not any(key.lower() == b"x-request-id" for key, _ in raw_headers):
                     raw_headers.append((b"x-request-id", request_id.encode("ascii")))
                 message["headers"] = raw_headers
             elif message_type == "http.response.body":
