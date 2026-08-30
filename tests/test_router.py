@@ -291,7 +291,7 @@ async def test_summary_route():
     import httpx
     from httpx import AsyncClient
     transport = httpx.ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(transport=transport, base_url="http://localhost") as client:
         response = await client.get("/summary")
 
     assert response.status_code == 200
@@ -308,7 +308,7 @@ async def test_not_found_route():
     import httpx
     from httpx import AsyncClient
     transport = httpx.ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(transport=transport, base_url="http://localhost") as client:
         response = await client.get("/nonexistent")
 
     assert response.status_code == 404
@@ -454,17 +454,16 @@ async def test_streamable_http_bridge():
 # --- Tool Filtering Tests ---
 
 def test_endpoint_config_allowed_denied_validation():
-    # Both provided -> denied_tools is cleared to None (precedence to allowed)
-    cfg = EndpointConfig(
-        path="test",
-        mode="remote",
-        url="http://localhost/mcp",
-        summary="Test",
-        allowed_tools=["toolA"],
-        denied_tools=["toolB"]
-    )
-    assert cfg.allowed_tools == ["toolA"]
-    assert cfg.denied_tools is None
+    # Conflicting allow/deny policy is rejected instead of silently discarding one side.
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        EndpointConfig(
+            path="test",
+            mode="remote",
+            url="http://localhost/mcp",
+            summary="Test",
+            allowed_tools=["toolA"],
+            denied_tools=["toolB"]
+        )
 
     # Only allowed provided -> preserved
     cfg_allow = EndpointConfig(
@@ -539,14 +538,19 @@ async def test_proxy_headers_forwarding():
             mode="remote",
             url="http://api.weather.com/mcp",
             summary="Weather summary",
-            headers={"X-Custom-Auth": "secret-token", "X-Override": "router-value"}
+            inbound_headers=["X-Client-Header", "X-Override"],
+            headers={
+                "Authorization": "Bearer upstream-secret",
+                "X-Custom-Auth": "secret-token",
+                "X-Override": "router-value",
+            }
         )
     }
 
     import httpx
     from httpx import AsyncClient
     transport = httpx.ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(transport=transport, base_url="http://localhost") as client:
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.headers = httpx.Headers({"content-type": "application/json"})
@@ -560,7 +564,12 @@ async def test_proxy_headers_forwarding():
             response = await client.post(
                 "/weather",
                 json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
-                headers={"X-Override": "client-value", "X-Client-Header": "only-client"}
+                headers={
+                    "Authorization": "Bearer caller-secret",
+                    "X-Override": "client-value",
+                    "X-Client-Header": "only-client",
+                    "X-Unlisted": "must-not-forward",
+                }
             )
             assert response.status_code == 200
             
@@ -572,8 +581,10 @@ async def test_proxy_headers_forwarding():
             assert called_headers.get("x-custom-auth") == "secret-token" or called_headers.get("X-Custom-Auth") == "secret-token"
             # Override header must have the value from the config
             assert called_headers.get("x-override") == "router-value" or called_headers.get("X-Override") == "router-value"
-            # Client header must still be present
+            # Explicitly allowlisted client headers are preserved, but caller credentials and unlisted headers are not.
             assert called_headers.get("x-client-header") == "only-client" or called_headers.get("X-Client-Header") == "only-client"
+            assert called_headers.get("authorization") == "Bearer upstream-secret" or called_headers.get("Authorization") == "Bearer upstream-secret"
+            assert called_headers.get("x-unlisted") is None and called_headers.get("X-Unlisted") is None
 
 
 @pytest.mark.asyncio
