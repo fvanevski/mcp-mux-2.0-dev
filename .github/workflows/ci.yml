@@ -81,11 +81,14 @@ jobs:
       - uses: astral-sh/setup-uv@v7.1.2
         with:
           python-version: "3.13"
-      - name: Generate secure cryptography lock delta
-        run: |
-          uv lock --upgrade-package cryptography
-          git diff -- uv.lock
-          exit 1
+      - name: Generate secure cryptography lock
+        run: uv lock --upgrade-package cryptography
+      - name: Upload resolver-generated lock
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase6-secure-uv-lock
+          path: uv.lock
+          if-no-files-found: error
 
   conformance:
     name: MCP conformance (2026-07-28)
@@ -116,11 +119,10 @@ jobs:
           timeout 30 bash -c 'until curl -fsS http://127.0.0.1:8012/summary >/dev/null; do sleep 0.5; done'
       - name: Run official MCP conformance suite through mux
         run: >-
-          npx --yes @modelcontextprotocol/conformance@0.1.16
+          npx --yes @modelcontextprotocol/conformance@0.2.0-alpha.11
           server
           --url http://127.0.0.1:8012/conformance
-          --suite active
-          --spec-version 2026-07-28
+          --requirements 2026-07-28
       - name: Emit service logs on failure
         if: failure()
         run: |
