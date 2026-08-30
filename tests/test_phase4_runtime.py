@@ -465,6 +465,88 @@ async def test_disabling_legacy_bridge_drops_session_and_rejects_stale_session_p
 
 
 @pytest.mark.asyncio
+async def test_cancelled_bridge_setup_releases_runtime_and_limit_leases() -> None:
+    router = MCPRouter(Starlette(), "unused")
+    endpoint = RouterConfig.model_validate(
+        {
+            "endpoints": [
+                {
+                    "path": "managed",
+                    "mode": "managed_cli",
+                    "argv": ["example-mcp", "--serve"],
+                    "url": "http://localhost:3033/mcp",
+                    "summary": "Managed bridge cancellation fixture",
+                    "legacy_sse_bridge": True,
+                    "limits": {"max_concurrent": 1},
+                }
+            ]
+        }
+    ).endpoints[0]
+    assert isinstance(endpoint, ManagedEndpointConfig)
+    router._configs = {"managed": endpoint}
+    runtime = router._runtimes["managed"]
+    runtime.state = RuntimeState.RUNNING
+    runtime.process = MagicMock(returncode=None)
+
+    session_id = "bridge-cancellation"
+    router.active_sessions[session_id] = BridgeSession(
+        path_prefix="managed",
+        queue=asyncio.Queue(),
+    )
+    runtime.legacy_session_ids.add(session_id)
+
+    setup_started = asyncio.Event()
+    hold_setup = asyncio.Event()
+
+    async def blocked_enter() -> Response:
+        setup_started.set()
+        await hold_setup.wait()
+        raise AssertionError("cancelled bridge setup unexpectedly resumed")
+
+    stream_context = MagicMock()
+    stream_context.__aenter__ = AsyncMock(side_effect=blocked_enter)
+    stream_context.__aexit__ = AsyncMock(return_value=None)
+    client = MagicMock()
+    client.stream = MagicMock(return_value=stream_context)
+
+    request = _proxy_request(
+        "POST",
+        "managed",
+        headers={"content-type": "application/json"},
+        query_string=f"session_id={session_id}".encode(),
+        body=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+    )
+
+    with patch.object(
+        router,
+        "_get_http_client",
+        new_callable=AsyncMock,
+        return_value=client,
+    ):
+        request_task = asyncio.create_task(router.catch_all_proxy(request))
+        await setup_started.wait()
+
+        assert runtime.active_leases == 1
+        held_lease, held_rejection = await router._limiter.acquire(endpoint)
+        assert held_lease is None
+        assert held_rejection is not None
+
+        request_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request_task
+
+    assert runtime.active_leases == 0
+    await asyncio.wait_for(runtime.wait_for_leases(), timeout=0.1)
+    assert runtime.legacy_tasks == set()
+    stream_context.__aexit__.assert_not_awaited()
+
+    recovered_lease, recovered_rejection = await router._limiter.acquire(endpoint)
+    assert recovered_rejection is None
+    assert recovered_lease is not None
+    await recovered_lease.release()
+
+
+@pytest.mark.asyncio
 async def test_stopped_retired_runtime_is_draining_before_first_await() -> None:
     router = MCPRouter(Starlette(), "unused")
     old_config = managed_config(url="http://localhost:3033/mcp")

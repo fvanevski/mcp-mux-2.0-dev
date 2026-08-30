@@ -1126,19 +1126,29 @@ class MCPRouter:
             and session_id
             and request_era is ProtocolEra.LEGACY
         ):
-            return await self._bridge_post(
-                request=request,
-                endpoint=endpoint,
-                runtime=runtime,
-                path_prefix=path_prefix,
-                target_url=target_url,
-                forward_headers=forward_headers,
-                request_body=request_body,
-                session_id=session_id,
-                policy=policy,
-                principal=principal,
-                on_complete=lambda: self._release_leases(limit_lease, runtime_lease),
-            )
+            # The request task owns both leases until _bridge_post() returns.
+            # A successful return means the bridge either released them for an
+            # early response or transferred ownership to its tracked response task.
+            bridge_setup_owns_leases = True
+            try:
+                response = await self._bridge_post(
+                    request=request,
+                    endpoint=endpoint,
+                    runtime=runtime,
+                    path_prefix=path_prefix,
+                    target_url=target_url,
+                    forward_headers=forward_headers,
+                    request_body=request_body,
+                    session_id=session_id,
+                    policy=policy,
+                    principal=principal,
+                    on_complete=lambda: self._release_leases(limit_lease, runtime_lease),
+                )
+                bridge_setup_owns_leases = False
+                return response
+            finally:
+                if bridge_setup_owns_leases:
+                    await self._release_leases(limit_lease, runtime_lease)
 
         try:
             response = await self._proxy_request(
