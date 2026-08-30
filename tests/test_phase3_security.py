@@ -14,6 +14,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 
 from mcp_router.core.config_loader import EndpointConfig, RouterConfig, SecurityConfig
+from mcp_router.core.limits import RequestLimiter
 from mcp_router.core.process_manager import ProcessManager
 from mcp_router.core.protocol import (
     CAPABILITY_DENIED,
@@ -492,6 +493,55 @@ async def test_tool_rate_limit_is_scoped_to_named_tool() -> None:
     assert first.status_code == 200
     assert second.status_code == 429
     assert fake_client.stream.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_endpoint_and_tool_concurrency_limits_release_cleanly() -> None:
+    limiter = RequestLimiter()
+    endpoint_limited = EndpointConfig(
+        path="endpoint-limited",
+        mode="remote",
+        url="https://upstream.test/mcp",
+        summary="Endpoint limited",
+        limits={"max_concurrent": 1},
+    )
+
+    endpoint_lease, endpoint_rejection = await limiter.acquire(endpoint_limited)
+    assert endpoint_lease is not None
+    assert endpoint_rejection is None
+    duplicate_lease, duplicate_rejection = await limiter.acquire(endpoint_limited)
+    assert duplicate_lease is None
+    assert duplicate_rejection is not None
+    assert duplicate_rejection.scope == "endpoint:endpoint-limited"
+
+    await endpoint_lease.release()
+    reacquired_lease, reacquired_rejection = await limiter.acquire(endpoint_limited)
+    assert reacquired_lease is not None
+    assert reacquired_rejection is None
+    await reacquired_lease.release()
+
+    tool_limited = EndpointConfig(
+        path="tool-limited",
+        mode="remote",
+        url="https://upstream.test/mcp",
+        summary="Tool limited",
+        tool_limits={"expensive": {"max_concurrent": 1}},
+    )
+    tool_lease, tool_rejection = await limiter.acquire(
+        tool_limited,
+        capability_name="expensive",
+    )
+    assert tool_lease is not None
+    assert tool_rejection is None
+    duplicate_tool_lease, duplicate_tool_rejection = await limiter.acquire(
+        tool_limited,
+        capability_name="expensive",
+    )
+    assert duplicate_tool_lease is None
+    assert duplicate_tool_rejection is not None
+    assert duplicate_tool_rejection.scope == "tool:tool-limited:expensive"
+
+    await tool_lease.release()
 
 
 @pytest.mark.asyncio
