@@ -694,9 +694,13 @@ class MCPRouter:
                 JSONResponse({"error": "Failed to proxy request"}, status_code=502)
             )
 
-        remote_session_id = response.headers.get("mcp-session-id")
-        if remote_session_id:
-            session.remote_session_id = remote_session_id
+        try:
+            remote_session_id = response.headers.get("mcp-session-id")
+            if remote_session_id:
+                session.remote_session_id = remote_session_id
+        except BaseException:
+            await stream_context.__aexit__(None, None, None)
+            raise
 
         async def process_response() -> None:
             try:
