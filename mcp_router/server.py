@@ -393,9 +393,13 @@ class MCPRouter:
             try:
                 await self.process_manager.start_managed_server(endpoint)
             except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
-                logger.error("Failed to start managed server %s: %s", path_prefix, exc)
+                logger.error(
+                    "Failed to start managed server %s: %s",
+                    path_prefix,
+                    self._redactor.redact(str(exc)),
+                )
                 return JSONResponse(
-                    {"error": f"Failed to start managed server: {exc}"},
+                    {"error": "Failed to start managed server"},
                     status_code=500,
                 )
         return None
@@ -451,6 +455,7 @@ class MCPRouter:
         params: dict[str, str],
         path_prefix: str,
         timeout: float,
+        principal: str,
     ) -> AsyncIterator[bytes]:
         self.active_connections[path_prefix] = self.active_connections.get(path_prefix, 0) + 1
         client = await self._get_http_client()
@@ -469,14 +474,16 @@ class MCPRouter:
 
                 def transform(data: str) -> str:
                     rewritten = _rewrite_legacy_endpoint_data(data, path_prefix)
-                    endpoint = self._configs.get(path_prefix)
-                    if endpoint is None:
-                        return rewritten
-                    return filter_tools_response(
-                        rewritten,
-                        endpoint.allowed_tools,
-                        endpoint.denied_tools,
+                    redacted = self._redactor.redact(rewritten)
+                    current_endpoint = self._configs.get(path_prefix)
+                    if current_endpoint is None:
+                        return redacted
+                    projected, _ = CapabilityPolicy.from_endpoint(current_endpoint).project_json_text(
+                        redacted,
+                        principal=principal,
+                        endpoint=path_prefix,
                     )
+                    return projected
 
                 yield render_sse_event(transform_sse_event(event, transform))
         finally:
@@ -519,12 +526,22 @@ class MCPRouter:
         forward_headers: dict[str, str],
         request_body: bytes,
         session_id: str,
+        policy: CapabilityPolicy,
+        principal: str,
+        on_complete: Callable[[], Awaitable[None]] | None = None,
     ) -> Response:
+        async def finish(response: Response) -> Response:
+            if on_complete is not None:
+                await on_complete()
+            return response
+
         session = self.active_sessions.get(session_id)
         if session is None:
-            return JSONResponse({"error": "Session not found"}, status_code=404)
+            return await finish(JSONResponse({"error": "Session not found"}, status_code=404))
         if session.path_prefix != path_prefix:
-            return JSONResponse({"error": "Session belongs to a different endpoint"}, status_code=409)
+            return await finish(
+                JSONResponse({"error": "Session belongs to a different endpoint"}, status_code=409)
+            )
 
         params = {
             key: value
@@ -553,8 +570,13 @@ class MCPRouter:
                 timeout=endpoint.upstream_timeout,
             )
         except (httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
-            logger.error("Failed to proxy bridge POST to streamable-http backend: %s", exc)
-            return JSONResponse({"error": f"Failed to proxy request: {exc}"}, status_code=502)
+            logger.error(
+                "Failed to proxy bridge POST to streamable-http backend: %s",
+                self._redactor.redact(str(exc)),
+            )
+            return await finish(
+                JSONResponse({"error": "Failed to proxy request"}, status_code=502)
+            )
 
         remote_session_id = response.headers.get("mcp-session-id")
         if remote_session_id:
@@ -568,25 +590,29 @@ class MCPRouter:
                         response.aread(),
                         timeout=endpoint.upstream_timeout,
                     )
-                    body_str = body_bytes.decode("utf-8", errors="replace")
-                    filtered_body = filter_tools_response(
+                    body_str = self._redactor.redact(
+                        body_bytes.decode("utf-8", errors="replace")
+                    )
+                    projected_body, _ = policy.project_json_text(
                         body_str,
-                        endpoint.allowed_tools,
-                        endpoint.denied_tools,
+                        principal=principal,
+                        endpoint=path_prefix,
                     )
                     await session.queue.put("event: message")
-                    await session.queue.put(f"data: {filtered_body}")
+                    await session.queue.put(f"data: {projected_body}")
                     await session.queue.put("")
                 elif "text/event-stream" in content_type or "event-stream" in content_type:
                     async for event in iter_sse_events(response.aiter_lines()):
-                        transformed = transform_sse_event(
-                            event,
-                            lambda data: filter_tools_response(
-                                data,
-                                endpoint.allowed_tools,
-                                endpoint.denied_tools,
-                            ),
-                        )
+                        def transform(data: str) -> str:
+                            redacted = self._redactor.redact(data)
+                            projected, _ = policy.project_json_text(
+                                redacted,
+                                principal=principal,
+                                endpoint=path_prefix,
+                            )
+                            return projected
+
+                        transformed = transform_sse_event(event, transform)
                         for line in transformed:
                             await session.queue.put(line)
                         await session.queue.put("")
@@ -604,9 +630,16 @@ class MCPRouter:
             except asyncio.CancelledError:
                 raise
             except (httpx.HTTPError, OSError, RuntimeError, UnicodeError, ValueError) as exc:
-                logger.error("Error reading response from streamable-http backend: %s", exc)
+                logger.error(
+                    "Error reading response from streamable-http backend: %s",
+                    self._redactor.redact(str(exc)),
+                )
             finally:
-                await stream_context.__aexit__(None, None, None)
+                try:
+                    await stream_context.__aexit__(None, None, None)
+                finally:
+                    if on_complete is not None:
+                        await on_complete()
 
         asyncio.create_task(process_response())
         return Response("Accepted", status_code=202)
