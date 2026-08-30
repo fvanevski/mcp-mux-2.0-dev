@@ -4,61 +4,83 @@ import asyncio
 import logging
 import os
 import signal
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from typing import Any
+
+import httpx
 
 from .config_loader import ManagedEndpointConfig
+from .protocol import CLIENT_CAPABILITIES_META, MODERN_PROTOCOL_VERSION, PROTOCOL_VERSION_META
+from .runtime import EndpointRuntime, RuntimeState
 
 logger = logging.getLogger(__name__)
 
+_SHUTDOWN_TIMEOUT_SECONDS = 3.0
+_READINESS_REQUEST_ID = "mcp-mux-readiness"
+_LEGACY_READINESS_PROTOCOL_VERSION = "2025-11-25"
+
 
 class ProcessManager:
-    """Registry for managed local subprocess lifecycles."""
+    """Managed-process supervisor operating on endpoint-owned runtime state."""
 
-    _instance: ProcessManager | None = None
-    _processes: dict[str, asyncio.subprocess.Process]
-    _log_tasks: list[asyncio.Task[None]]
-
-    def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._processes = {}
-            cls._instance._log_tasks = []
-            cls._instance._redact = lambda text: text
-        return cls._instance
-
-    def __init__(self):
-        if hasattr(self, "_initialized"):
-            return
-        self._initialized = True
+    def __init__(self) -> None:
+        self._redact: Callable[[str], str] = lambda text: text
 
     def set_redactor(self, redactor: Callable[[str], str]) -> None:
         self._redact = redactor
 
-    def is_running(self, path: str) -> bool:
-        proc = self._processes.get(path)
-        if proc is None:
-            return False
-        return proc.returncode is None
+    @staticmethod
+    def is_running(runtime: EndpointRuntime) -> bool:
+        proc = runtime.process
+        return proc is not None and proc.returncode is None
 
-    async def start_managed_server(self, endpoint_cfg: ManagedEndpointConfig) -> str:
-        path = endpoint_cfg.path
-        if self.is_running(path):
-            logger.info("Process for path '%s' is already running.", path)
+    async def start_managed_server(self, runtime: EndpointRuntime) -> str:
+        async with runtime.lock:
+            return await self._start_locked(runtime, reset_restart_attempts=True)
+
+    async def _start_locked(
+        self,
+        runtime: EndpointRuntime,
+        *,
+        reset_restart_attempts: bool,
+    ) -> str:
+        endpoint_cfg = runtime.config
+        if not isinstance(endpoint_cfg, ManagedEndpointConfig):
+            raise TypeError(f"Endpoint '{runtime.path}' is not a managed endpoint")
+        if self.is_running(runtime) and runtime.state is RuntimeState.RUNNING:
             return endpoint_cfg.url
+        if runtime.state is RuntimeState.DRAINING:
+            raise RuntimeError(f"Managed endpoint '{runtime.path}' is draining")
+
+        current_task = asyncio.current_task()
+        restart_task = runtime.restart_task
+        if restart_task is not None and restart_task is not current_task and not restart_task.done():
+            restart_task.cancel()
+            await asyncio.gather(restart_task, return_exceptions=True)
+            runtime.restart_task = None
+
+        if reset_restart_attempts:
+            runtime.restart_attempts = 0
+        runtime.state = RuntimeState.STARTING
+        runtime.failure_reason = None
 
         readiness = endpoint_cfg.readiness
         if readiness.host is None or readiness.port is None:
-            raise RuntimeError(f"Managed endpoint '{path}' has unresolved readiness settings")
+            runtime.state = RuntimeState.FAILED
+            runtime.failure_reason = "unresolved readiness settings"
+            raise RuntimeError(
+                f"Managed endpoint '{runtime.path}' has unresolved readiness settings"
+            )
 
         subprocess_env = os.environ.copy()
         subprocess_env.update(endpoint_cfg.env)
-        preexec_fn = os.setsid if hasattr(os, "setsid") else None
+        start_new_session = os.name == "posix"
 
         try:
             if endpoint_cfg.argv is not None:
                 logger.info(
                     "Spawning managed process for path '%s' using executable %r on %s:%s",
-                    path,
+                    runtime.path,
                     endpoint_cfg.argv[0],
                     readiness.host,
                     readiness.port,
@@ -69,15 +91,17 @@ class ProcessManager:
                     stderr=asyncio.subprocess.PIPE,
                     cwd=endpoint_cfg.cwd,
                     env=subprocess_env,
-                    preexec_fn=preexec_fn,
+                    start_new_session=start_new_session,
                 )
             else:
                 shell_command = endpoint_cfg.unsafe_shell_command
                 if shell_command is None:
-                    raise RuntimeError(f"Managed endpoint '{path}' has no execution command")
+                    raise RuntimeError(
+                        f"Managed endpoint '{runtime.path}' has no execution command"
+                    )
                 logger.warning(
                     "Spawning explicitly unsafe shell process for path '%s' on %s:%s",
-                    path,
+                    runtime.path,
                     readiness.host,
                     readiness.port,
                 )
@@ -87,65 +111,376 @@ class ProcessManager:
                     stderr=asyncio.subprocess.PIPE,
                     cwd=endpoint_cfg.cwd,
                     env=subprocess_env,
-                    preexec_fn=preexec_fn,
+                    start_new_session=start_new_session,
                 )
 
-            self._processes[path] = proc
+            runtime.process = proc
             if proc.stdout is None or proc.stderr is None:
-                raise RuntimeError(f"Managed endpoint '{path}' did not expose piped output streams")
-            task_stdout = asyncio.create_task(self._stream_logs(proc.stdout, f"{path}:stdout"))
-            task_stderr = asyncio.create_task(self._stream_logs(proc.stderr, f"{path}:stderr"))
-            self._log_tasks.extend([task_stdout, task_stderr])
-
-            success = await self._wait_for_port(
-                readiness.port,
-                host=readiness.host,
-                timeout=readiness.timeout,
-                interval=readiness.interval,
+                raise RuntimeError(
+                    f"Managed endpoint '{runtime.path}' did not expose piped output streams"
+                )
+            runtime.stdout_task = asyncio.create_task(
+                self._stream_logs(proc.stdout, f"{runtime.path}:stdout"),
+                name=f"mcp-mux:{runtime.path}:stdout",
             )
-            if not success:
+            runtime.stderr_task = asyncio.create_task(
+                self._stream_logs(proc.stderr, f"{runtime.path}:stderr"),
+                name=f"mcp-mux:{runtime.path}:stderr",
+            )
+            runtime.exit_task = asyncio.create_task(
+                self._monitor_exit(runtime, proc),
+                name=f"mcp-mux:{runtime.path}:exit",
+            )
+
+            if not await self._wait_for_readiness(runtime, endpoint_cfg):
                 if proc.returncode is not None:
-                    raise RuntimeError(f"Process terminated instantly with exit code {proc.returncode}")
+                    raise RuntimeError(
+                        f"Process terminated before readiness with exit code {proc.returncode}"
+                    )
                 raise TimeoutError(
-                    f"Local HTTP service on {readiness.host}:{readiness.port} failed to become ready in time"
+                    f"MCP service at {endpoint_cfg.url} failed readiness within "
+                    f"{readiness.timeout}s"
                 )
 
-            logger.info("Subserver for path '%s' is ready at %s", path, endpoint_cfg.url)
+            runtime.state = RuntimeState.RUNNING
+            runtime.failure_reason = None
+            runtime.last_completed_activity = asyncio.get_running_loop().time()
+            logger.info(
+                "Managed endpoint '%s' is MCP-ready at %s",
+                runtime.path,
+                endpoint_cfg.url,
+            )
             return endpoint_cfg.url
-        except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
-            logger.error("Failed to launch subserver for path '%s': %s", path, exc)
-            await self.stop_managed_server(path)
+        except (OSError, RuntimeError, TimeoutError, ValueError, httpx.HTTPError) as exc:
+            runtime.failure_reason = self._redact(str(exc))
+            logger.error(
+                "Failed to launch managed endpoint '%s': %s",
+                runtime.path,
+                runtime.failure_reason,
+            )
+            await self._terminate_locked(runtime, final_state=RuntimeState.FAILED)
             raise
 
-    async def stop_managed_server(self, path: str):
-        proc = self._processes.pop(path, None)
-        if proc:
-            logger.info("Terminating subprocess group for '%s' (PID %s)", path, proc.pid)
+    async def drain_and_stop(self, runtime: EndpointRuntime) -> None:
+        async with runtime.lock:
+            if runtime.state is not RuntimeState.STOPPED:
+                runtime.state = RuntimeState.DRAINING
+        await runtime.wait_for_leases()
+        await runtime.cancel_legacy_tasks()
+        await self.stop_managed_server(runtime)
+
+    async def stop_managed_server(self, runtime: EndpointRuntime) -> None:
+        async with runtime.lock:
+            await self._terminate_locked(runtime, final_state=RuntimeState.STOPPED)
+
+    async def _terminate_locked(
+        self,
+        runtime: EndpointRuntime,
+        *,
+        final_state: RuntimeState,
+    ) -> None:
+        current_task = asyncio.current_task()
+
+        restart_task = runtime.restart_task
+        if restart_task is not None and restart_task is not current_task and not restart_task.done():
+            restart_task.cancel()
+            await asyncio.gather(restart_task, return_exceptions=True)
+        if restart_task is not current_task:
+            runtime.restart_task = None
+
+        exit_task = runtime.exit_task
+        if exit_task is not None and exit_task is not current_task and not exit_task.done():
+            exit_task.cancel()
+            await asyncio.gather(exit_task, return_exceptions=True)
+        if exit_task is not current_task:
+            runtime.exit_task = None
+
+        proc = runtime.process
+        if proc is not None and proc.returncode is None:
+            logger.info(
+                "Terminating managed process for '%s' (PID %s)",
+                runtime.path,
+                proc.pid,
+            )
             try:
-                if hasattr(os, "killpg") and hasattr(os, "getpgid"):
+                if os.name == "posix" and hasattr(os, "killpg"):
                     try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                        os.killpg(proc.pid, signal.SIGTERM)
                     except ProcessLookupError:
                         pass
                 else:
                     proc.terminate()
 
                 try:
-                    await asyncio.wait_for(proc.wait(), timeout=3.0)
+                    await asyncio.wait_for(proc.wait(), timeout=_SHUTDOWN_TIMEOUT_SECONDS)
                 except TimeoutError:
-                    logger.warning("Process for '%s' (PID %s) did not exit. Forcing SIGKILL.", path, proc.pid)
-                    if hasattr(os, "killpg") and hasattr(os, "getpgid"):
+                    logger.warning(
+                        "Process for '%s' (PID %s) did not exit; forcing termination",
+                        runtime.path,
+                        proc.pid,
+                    )
+                    if os.name == "posix" and hasattr(os, "killpg"):
                         try:
-                            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                            os.killpg(proc.pid, signal.SIGKILL)
                         except ProcessLookupError:
                             pass
                     else:
                         proc.kill()
                     await proc.wait()
             except (OSError, RuntimeError) as exc:
-                logger.error("Error terminating process group for '%s': %s", path, exc)
+                logger.error(
+                    "Error terminating process for '%s': %s",
+                    runtime.path,
+                    self._redact(str(exc)),
+                )
 
-    async def _stream_logs(self, stream: asyncio.StreamReader, prefix: str):
+        await self._finish_log_tasks_locked(runtime)
+        runtime.process = None
+        runtime.state = final_state
+
+    async def _finish_log_tasks_locked(self, runtime: EndpointRuntime) -> None:
+        tasks = [
+            task
+            for task in (runtime.stdout_task, runtime.stderr_task)
+            if task is not None
+        ]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        runtime.stdout_task = None
+        runtime.stderr_task = None
+
+    async def _monitor_exit(
+        self,
+        runtime: EndpointRuntime,
+        proc: asyncio.subprocess.Process,
+    ) -> None:
+        try:
+            returncode = await proc.wait()
+        except asyncio.CancelledError:
+            raise
+
+        async with runtime.lock:
+            if runtime.process is not proc:
+                return
+            runtime.last_exit_code = returncode
+            runtime.process = None
+            runtime.exit_task = None
+            await self._finish_log_tasks_locked(runtime)
+
+            if runtime.state in {RuntimeState.DRAINING, RuntimeState.STOPPED}:
+                return
+
+            runtime.state = RuntimeState.FAILED
+            runtime.failure_reason = f"managed process exited unexpectedly with code {returncode}"
+            logger.error(
+                "Managed endpoint '%s' failed: %s",
+                runtime.path,
+                runtime.failure_reason,
+            )
+            self._schedule_restart_locked(runtime)
+
+    def _schedule_restart_locked(self, runtime: EndpointRuntime) -> None:
+        endpoint_cfg = runtime.config
+        if not isinstance(endpoint_cfg, ManagedEndpointConfig):
+            return
+        restart = endpoint_cfg.restart
+        if not restart.enabled or runtime.restart_attempts >= restart.max_attempts:
+            return
+        existing = runtime.restart_task
+        if existing is not None and not existing.done():
+            return
+        runtime.restart_task = asyncio.create_task(
+            self._restart_loop(runtime),
+            name=f"mcp-mux:{runtime.path}:restart",
+        )
+
+    async def _restart_loop(self, runtime: EndpointRuntime) -> None:
+        current_task = asyncio.current_task()
+        try:
+            while True:
+                async with runtime.lock:
+                    endpoint_cfg = runtime.config
+                    if not isinstance(endpoint_cfg, ManagedEndpointConfig):
+                        return
+                    restart = endpoint_cfg.restart
+                    if (
+                        runtime.state is not RuntimeState.FAILED
+                        or not restart.enabled
+                        or runtime.restart_attempts >= restart.max_attempts
+                    ):
+                        return
+                    runtime.restart_attempts += 1
+                    attempt = runtime.restart_attempts
+                    delay = self._restart_delay(endpoint_cfg, attempt)
+
+                logger.warning(
+                    "Restarting managed endpoint '%s' after %.3fs (attempt %s/%s)",
+                    runtime.path,
+                    delay,
+                    attempt,
+                    restart.max_attempts,
+                )
+                await asyncio.sleep(delay)
+
+                async with runtime.lock:
+                    if runtime.state is not RuntimeState.FAILED:
+                        return
+                    try:
+                        await self._start_locked(
+                            runtime,
+                            reset_restart_attempts=False,
+                        )
+                    except (OSError, RuntimeError, TimeoutError, ValueError, httpx.HTTPError):
+                        continue
+
+                    if runtime.restart_task is current_task:
+                        runtime.restart_task = None
+                    return
+        finally:
+            async with runtime.lock:
+                if runtime.restart_task is current_task:
+                    runtime.restart_task = None
+
+    @staticmethod
+    def _restart_delay(endpoint_cfg: ManagedEndpointConfig, attempt: int) -> float:
+        restart = endpoint_cfg.restart
+        exponent = max(0, attempt - 1)
+        return min(restart.initial_backoff * (2**exponent), restart.max_backoff)
+
+    async def _wait_for_readiness(
+        self,
+        runtime: EndpointRuntime,
+        endpoint_cfg: ManagedEndpointConfig,
+    ) -> bool:
+        readiness = endpoint_cfg.readiness
+        if readiness.host is None or readiness.port is None:
+            return False
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + readiness.timeout
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return False
+        if not await self._wait_for_port(
+            readiness.port,
+            host=readiness.host,
+            timeout=remaining,
+            interval=readiness.interval,
+        ):
+            return False
+
+        while True:
+            proc = runtime.process
+            if proc is None or proc.returncode is not None:
+                return False
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
+            probe_timeout = min(max(readiness.interval, 0.1), remaining)
+            if await self._probe_modern_discovery(endpoint_cfg.url, probe_timeout):
+                return True
+            if (
+                readiness.legacy_initialize_fallback
+                and await self._probe_legacy_initialize(endpoint_cfg.url, probe_timeout)
+            ):
+                return True
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(readiness.interval, remaining))
+
+    async def _probe_modern_discovery(self, url: str, timeout: float) -> bool:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": _READINESS_REQUEST_ID,
+            "method": "server/discover",
+            "params": {
+                "_meta": {
+                    PROTOCOL_VERSION_META: MODERN_PROTOCOL_VERSION,
+                    CLIENT_CAPABILITIES_META: {},
+                }
+            },
+        }
+        headers = {
+            "content-type": "application/json",
+            "accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": MODERN_PROTOCOL_VERSION,
+            "Mcp-Method": "server/discover",
+        }
+        return await self._probe_jsonrpc_result(url, payload, headers, timeout)
+
+    async def _probe_legacy_initialize(self, url: str, timeout: float) -> bool:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": _READINESS_REQUEST_ID,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": _LEGACY_READINESS_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "mcp-mux-readiness", "version": "0"},
+            },
+        }
+        headers = {
+            "content-type": "application/json",
+            "accept": "application/json, text/event-stream",
+        }
+        return await self._probe_jsonrpc_result(url, payload, headers, timeout)
+
+    async def _probe_jsonrpc_result(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        headers: dict[str, str],
+        timeout: float,
+    ) -> bool:
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(timeout),
+                follow_redirects=False,
+            ) as client:
+                response = await client.post(url, json=payload, headers=headers)
+        except (httpx.HTTPError, OSError, RuntimeError, ValueError):
+            return False
+        if not 200 <= response.status_code < 300:
+            return False
+        response_payload = self._extract_jsonrpc_payload(response)
+        return (
+            isinstance(response_payload, dict)
+            and response_payload.get("jsonrpc") == "2.0"
+            and response_payload.get("id") == _READINESS_REQUEST_ID
+            and isinstance(response_payload.get("result"), dict)
+        )
+
+    @staticmethod
+    def _extract_jsonrpc_payload(response: httpx.Response) -> object | None:
+        content_type = response.headers.get("content-type", "").casefold()
+        if "event-stream" not in content_type:
+            try:
+                return response.json()
+            except ValueError:
+                return None
+
+        data_lines: list[str] = []
+        for line in response.text.splitlines():
+            if not line:
+                if data_lines:
+                    break
+                continue
+            if line.startswith("data:"):
+                data_lines.append(line[5:].lstrip())
+        if not data_lines:
+            return None
+        try:
+            import json
+
+            return json.loads("\n".join(data_lines))
+        except ValueError:
+            return None
+
+    async def _stream_logs(self, stream: asyncio.StreamReader, prefix: str) -> None:
         try:
             while True:
                 line = await stream.readline()
@@ -154,9 +489,13 @@ class ProcessManager:
                 decoded = line.decode("utf-8", errors="replace").rstrip()
                 logger.info("[%s] %s", prefix, self._redact(decoded))
         except asyncio.CancelledError:
-            pass
+            raise
         except (OSError, RuntimeError) as exc:
-            logger.error("Error streaming logs for %s: %s", prefix, exc)
+            logger.error(
+                "Error streaming logs for %s: %s",
+                prefix,
+                self._redact(str(exc)),
+            )
 
     async def _wait_for_port(
         self,
@@ -194,16 +533,9 @@ class ProcessManager:
                     pass
             return True
 
-    async def cleanup(self):
-        logger.info("Initiating cleanup of all active subprocesses.")
-        paths = list(self._processes.keys())
-        for path in paths:
-            await self.stop_managed_server(path)
-
-        for task in self._log_tasks:
-            if not task.done():
-                task.cancel()
-        if self._log_tasks:
-            await asyncio.gather(*self._log_tasks, return_exceptions=True)
-            self._log_tasks.clear()
+    async def cleanup(self, runtimes: Iterable[EndpointRuntime]) -> None:
+        logger.info("Initiating cleanup of managed endpoint subprocesses.")
+        for runtime in list(runtimes):
+            if runtime.managed:
+                await self.drain_and_stop(runtime)
         logger.info("Process manager cleanup complete.")
