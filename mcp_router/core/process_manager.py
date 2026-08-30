@@ -340,9 +340,8 @@ class ProcessManager:
                         runtime.restart_task = None
                     return
         finally:
-            async with runtime.lock:
-                if runtime.restart_task is current_task:
-                    runtime.restart_task = None
+            if runtime.restart_task is current_task:
+                runtime.restart_task = None
 
     @staticmethod
     def _restart_delay(endpoint_cfg: ManagedEndpointConfig, attempt: int) -> float:
