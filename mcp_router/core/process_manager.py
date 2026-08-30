@@ -304,9 +304,15 @@ class ProcessManager:
                 runtime.path,
                 runtime.failure_reason,
             )
-            self._schedule_restart_locked(runtime)
+            self._schedule_restart_if_allowed(runtime)
 
-    def _schedule_restart_locked(self, runtime: EndpointRuntime) -> None:
+    def reconcile_restart_policy(self, runtime: EndpointRuntime) -> None:
+        """Apply the current in-place restart policy without resetting failure history."""
+        self._schedule_restart_if_allowed(runtime)
+
+    def _schedule_restart_if_allowed(self, runtime: EndpointRuntime) -> None:
+        if runtime.state is not RuntimeState.FAILED:
+            return
         endpoint_cfg = runtime.config
         if not isinstance(endpoint_cfg, ManagedEndpointConfig):
             return

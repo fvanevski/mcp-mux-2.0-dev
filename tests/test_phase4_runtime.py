@@ -1108,6 +1108,144 @@ async def test_restart_backoff_revalidates_in_place_policy_before_start(
     assert runtime.restart_task is None
 
 
+@pytest.mark.parametrize(
+    ("initial_restart", "replacement_restart"),
+    [
+        (
+            {
+                "enabled": False,
+                "max_attempts": 3,
+                "initial_backoff": 0.25,
+                "max_backoff": 0.5,
+            },
+            {
+                "enabled": True,
+                "max_attempts": 3,
+                "initial_backoff": 0.25,
+                "max_backoff": 0.5,
+            },
+        ),
+        (
+            {
+                "enabled": True,
+                "max_attempts": 1,
+                "initial_backoff": 0.25,
+                "max_backoff": 0.5,
+            },
+            {
+                "enabled": True,
+                "max_attempts": 3,
+                "initial_backoff": 0.25,
+                "max_backoff": 0.5,
+            },
+        ),
+    ],
+    ids=["enabled-after-failure", "attempt-bound-raised"],
+)
+@pytest.mark.asyncio
+async def test_in_place_restart_policy_resumes_failed_supervisor_once(
+    initial_restart: dict[str, object],
+    replacement_restart: dict[str, object],
+) -> None:
+    router = MCPRouter(Starlette(), "unused")
+    endpoint = managed_config(restart=initial_restart)
+    router._configs = {endpoint.path: endpoint}
+    runtime = router._runtimes[endpoint.path]
+    runtime.state = RuntimeState.FAILED
+    runtime.restart_attempts = 1
+    backoff_started = asyncio.Event()
+    release_backoff = asyncio.Event()
+
+    replacement_endpoint = endpoint.model_copy(
+        update={"restart": ManagedRestartConfig.model_validate(replacement_restart)}
+    )
+    replacement = RouterConfig(endpoints=[replacement_endpoint])
+
+    async def blocked_backoff(delay: float) -> None:
+        assert delay == 0.5
+        backoff_started.set()
+        await release_backoff.wait()
+
+    async def successful_restart(
+        candidate_runtime: EndpointRuntime,
+        *,
+        reset_restart_attempts: bool,
+    ) -> str:
+        assert candidate_runtime is runtime
+        assert reset_restart_attempts is False
+        candidate_runtime.state = RuntimeState.RUNNING
+        return candidate_runtime.config.url
+
+    with (
+        patch(
+            "mcp_router.core.process_manager.asyncio.sleep",
+            side_effect=blocked_backoff,
+        ),
+        patch.object(
+            router.process_manager,
+            "_start_locked",
+            new_callable=AsyncMock,
+            side_effect=successful_restart,
+        ) as start_locked,
+    ):
+        await router.apply_configuration(replacement)
+        restart_task = runtime.restart_task
+        assert restart_task is not None
+        await backoff_started.wait()
+
+        assert runtime.restart_attempts == 2
+        assert runtime.config is replacement_endpoint
+
+        # Reapplying the same permissive policy while recovery is pending must
+        # retain the same supervisor task rather than schedule a duplicate.
+        await router.apply_configuration(replacement)
+        assert runtime.restart_task is restart_task
+
+        release_backoff.set()
+        await restart_task
+
+    start_locked.assert_awaited_once_with(runtime, reset_restart_attempts=False)
+    assert runtime.state is RuntimeState.RUNNING
+    assert runtime.restart_attempts == 2
+    assert runtime.restart_task is None
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        RuntimeState.STOPPED,
+        RuntimeState.STARTING,
+        RuntimeState.RUNNING,
+        RuntimeState.DRAINING,
+    ],
+)
+@pytest.mark.asyncio
+async def test_in_place_restart_policy_does_not_activate_nonfailed_runtime(
+    state: RuntimeState,
+) -> None:
+    router = MCPRouter(Starlette(), "unused")
+    endpoint = managed_config(restart={"enabled": False, "max_attempts": 3})
+    router._configs = {endpoint.path: endpoint}
+    runtime = router._runtimes[endpoint.path]
+    runtime.state = state
+
+    replacement_endpoint = endpoint.model_copy(
+        update={
+            "restart": ManagedRestartConfig.model_validate(
+                {"enabled": True, "max_attempts": 3}
+            )
+        }
+    )
+    replacement = RouterConfig(endpoints=[replacement_endpoint])
+
+    await router.apply_configuration(replacement)
+
+    assert router._runtimes[endpoint.path] is runtime
+    assert runtime.config is replacement_endpoint
+    assert runtime.state is state
+    assert runtime.restart_task is None
+
+
 @pytest.mark.asyncio
 async def test_idle_timeout_skips_active_stream_lease_then_stops_after_release() -> None:
     router = MCPRouter(Starlette(), "unused")

@@ -326,11 +326,13 @@ class MCPRouter:
                 self._drop_sessions_for_path(path)
 
             next_runtimes: dict[str, EndpointRuntime] = {}
+            retained_runtimes: list[EndpointRuntime] = []
             for path, endpoint in new_endpoints.items():
                 current = current_runtimes.get(path)
                 if current is not None and path not in retired_paths:
                     current.config = endpoint
                     next_runtimes[path] = current
+                    retained_runtimes.append(current)
                 else:
                     next_runtimes[path] = EndpointRuntime.from_config(endpoint)
 
@@ -341,6 +343,13 @@ class MCPRouter:
             self.security_config = config.security
             self._redactor = SecretRedactor.from_router_config(config)
             self.process_manager.set_redactor(self._redactor.redact)
+
+            # Restart tasks created here cannot run until this coroutine yields, so
+            # the complete replacement snapshot is authoritative before recovery begins.
+            # Reconciliation is idempotent and only schedules retained FAILED runtimes
+            # whose newly published policy permits another supervisor-owned attempt.
+            for runtime in retained_runtimes:
+                self.process_manager.reconcile_restart_policy(runtime)
 
         logger.info("Applied config. Active paths: %s", list(self._runtimes))
 
