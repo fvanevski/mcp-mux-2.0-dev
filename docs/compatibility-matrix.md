@@ -77,7 +77,7 @@ The target contract is normative for later implementation, but Phase 0 does not 
 | Message shape | Valid JSON-RPC object only; no Streamable HTTP batches or request-body repair. |
 | Transparency | Unknown valid fields, extension methods, and `_meta` data survive proxying. |
 | Legacy session header | `Mcp-Session-Id` is not modern protocol state. A modern request must not depend on it. |
-| Subpaths | Arbitrary `/<namespace>/<subpath>` forwarding is not part of the modern contract. |
+| Subpaths | Arbitrary `/<namespace>/<subpath>` forwarding is not part of the modern contract; `/<namespace>/` is also non-canonical and must not bypass the subpath restriction. |
 | Aggregation | A namespace still selects one upstream; there is no merged-tool MCP server. |
 
 Primary protocol references:
@@ -104,8 +104,10 @@ Primary protocol references:
 | `M-ST-08` | `resources/read` derives `Mcp-Name` from `params.uri`. | Fixture authority / target | `test_modern_fixture_uses_resource_uri_for_mcp_name` |
 | `M-ST-09` | A legacy session header is not used as modern protocol state. | Fixture authority / target | `test_modern_fixture_does_not_use_legacy_session_header_for_protocol_state` |
 | `M-ST-10` | Successful fixture responses include `resultType`; listed tools include `inputSchema`. | Fixture authority | operator scenario assertions |
+| `M-ST-11` | Modern Streamable HTTP accepts only the canonical bare namespace route; both non-empty subpaths and the empty trailing-slash subpath are rejected locally before upstream dispatch. | Phase 2 target | `test_modern_subpath_is_rejected` |
+| `M-ST-12` | Long-lived modern event-stream responses are not terminated solely because no response chunk arrives within `upstream_timeout`; request establishment remains bounded and downstream cancellation closes upstream. | Phase 2 target | `test_downstream_cancellation_closes_upstream_response_context` |
 
-The fixture validates a correct modern peer. Production rejection of malformed/mismatched modern traffic remains Phase 2 work; Phase 0 does not falsely assert that the current router already performs that validation.
+The fixture remains the deterministic oracle for a correct modern peer. Phase 2 adds the production gateway validation that rejects malformed or mismatched modern traffic before forwarding, while the Phase 0 fixture continues to provide independent upstream-side compatibility evidence.
 
 ### B. Legacy sessionful Streamable HTTP
 
@@ -123,7 +125,8 @@ The fixture validates a correct modern peer. Production rejection of malformed/m
 | `L-SSE-01` | Explicit `transport="sse"` proxies downstream SSE GET to the legacy upstream path. | Current compatibility | `test_legacy_http_sse_baseline` |
 | `L-SSE-02` | Upstream endpoint events are rewritten beneath the mux namespace. | Current compatibility | same |
 | `L-SSE-03` | Downstream POST to the rewritten subpath maps to the upstream legacy message path/query. | Current compatibility | same + existing `test_sse_message_post_uses_upstream_message_path` |
-| `L-SSE-04` | Arbitrary subpath rewriting is legacy-only in the target architecture. | Target | Phase 2 regression when restriction is implemented |
+| `L-SSE-04` | Arbitrary subpath rewriting is legacy-only in the target architecture. | Target | `test_modern_subpath_is_rejected` plus legacy HTTP+SSE baseline |
+| `L-SSE-05` | A valid explicit legacy SSE stream may remain quiet longer than `upstream_timeout`; the timeout bounds request establishment but is not an SSE read-idle limit. | Phase 2 preservation | `test_legacy_sse_stream_has_no_read_idle_timeout` |
 
 ### D. Mux-local `legacy_sse_bridge`
 
@@ -136,12 +139,13 @@ The fixture validates a correct modern peer. Production rejection of malformed/m
 | `BR-05` | Removing/changing an endpoint drops its bridge sessions. | Current reload invariant | existing configuration regression |
 | `BR-06` | Bridge resources become bounded/cancellable/observable. | Future target | Phase 5 |
 
-### E. Current protocol repair and response projection
+### E. Protocol validation and response projection
 
 | Claim ID | Baseline claim | Classification | Test evidence |
 |---|---|---|---|
-| `CUR-01` | Current router inserts missing `jsonrpc: "2.0"` into request dictionaries with a method. | Current defect/compatibility behavior scheduled to break | existing regression |
-| `CUR-02` | Current router repairs qualifying batch items. | Current behavior scheduled to break | existing regression |
+| `CUR-01` | The Phase 2 edge rejects a request object missing `jsonrpc: "2.0"`; it does not repair or forward it. | Intended v0.2.0 breaking change | `test_streamable_http_direct_post_rejects_missing_jsonrpc_version` + Phase 2 protocol-edge regressions |
+| `CUR-02` | The Phase 2 edge rejects JSON-RPC batch bodies instead of repairing or forwarding batch items. | Intended v0.2.0 breaking change | `test_streamable_http_direct_post_rejects_jsonrpc_batch` + Phase 2 protocol-edge regressions |
+| `CUR-02A` | Strict JSON parsing rejects the non-standard numeric constants `NaN`, `Infinity`, and `-Infinity`; invalid raw bytes are never forwarded upstream. | Phase 2 target | `test_parse_rejects_non_json_numeric_constants` + `test_invalid_streamable_requests_are_rejected_before_upstream` |
 | `CUR-03` | Current tool policy projects `tools/list` with allow/deny lists. | Current behavior | existing filter tests |
 | `CUR-04` | Tool-list projection does not prove direct-call authorization. | Known security defect | Phase 3 |
 | `CUR-05` | Rebuilt JSON responses strip stale encoding/length headers. | Current response-safety behavior | existing regression |
@@ -185,7 +189,7 @@ PRESERVATION_INVARIANTS:
 
 ## Intended v0.2.0 breaking changes
 
-Later phases intentionally:
+The v0.2.0 phases intentionally:
 
 - reject malformed JSON-RPC and Streamable HTTP batches rather than repairing them;
 - enforce the modern per-request metadata and routing-header contract;

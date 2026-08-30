@@ -28,12 +28,14 @@ OPERATOR_VERIFIED_MODERN_SCENARIOS = [
 @pytest.fixture(autouse=True)
 def _reset_router_runtime_state():
     router._configs = {}
+    router._http_client = None
     router.active_sessions.clear()
     router.active_connections.clear()
     router.last_activity.clear()
     router.locks.clear()
     yield
     router._configs = {}
+    router._http_client = None
     router.active_sessions.clear()
     router.active_connections.clear()
     router.last_activity.clear()

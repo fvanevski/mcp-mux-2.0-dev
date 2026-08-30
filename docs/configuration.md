@@ -2,6 +2,8 @@
 
 `mcp_router/config.yaml` is validated before an endpoint definition can become active. The accepted endpoint modes are intentionally limited to behavior implemented by the router: `remote` and `managed_cli`. Historical `stdio_bridge` configuration is rejected.
 
+At router scope, `max_request_body_bytes` bounds JSON-RPC POST bodies before they can be forwarded. It defaults to 1 MiB (`1048576`) and accepts values from 1 KiB through 64 MiB. The limit applies after any declared `Content-Length` precheck and again while the actual request body is streamed.
+
 ## Common endpoint fields
 
 Every endpoint requires:
@@ -11,7 +13,7 @@ Every endpoint requires:
 - `url`: an absolute `http` or `https` URL.
 - `summary`: a non-empty operator-facing description.
 
-Optional common fields are `timeout`, `transport`, `legacy_sse_bridge`, `headers`, `allowed_tools`, and `denied_tools`. `timeout` must be positive. `transport`, when explicit, is `sse` or `streamable-http`; otherwise it is inferred from the URL. `legacy_sse_bridge` is valid only for `streamable-http` endpoints. Tool names must be non-empty and unique within their list. If both allow and deny lists are present, the allowlist continues to take precedence.
+Optional common fields are `timeout`, `upstream_timeout`, `transport`, `legacy_sse_bridge`, `headers`, `allowed_tools`, and `denied_tools`. `timeout` is the existing managed-endpoint inactivity timeout. `upstream_timeout` defaults to 60 seconds and bounds upstream request establishment plus finite response consumption: connect/write/pool operations remain bounded, response headers must arrive within the configured budget, complete JSON responses must finish within that budget, and non-SSE streamed responses retain a per-chunk idle bound. Event-stream responses deliberately have no read-idle timeout because both modern Streamable HTTP and explicit legacy HTTP+SSE may remain valid while quiet; downstream cancellation still closes the corresponding upstream response context. Both configuration values must be positive. `transport`, when explicit, is `sse` or `streamable-http`; otherwise it is inferred from the URL. `legacy_sse_bridge` is valid only for `streamable-http` endpoints. Tool names must be non-empty and unique within their list. If both allow and deny lists are present, the allowlist continues to take precedence.
 
 Configuration models reject unknown fields. Environment references are expanded before model validation using `${NAME}` for required values or `${NAME:-fallback}` for a default.
 

@@ -99,6 +99,7 @@ class EndpointBase(BaseModel):
     url: str
     summary: str
     timeout: float = Field(default=300.0, gt=0)
+    upstream_timeout: float = Field(default=60.0, gt=0)
     transport: Literal["sse", "streamable-http"] | None = None
     legacy_sse_bridge: bool = False
     allowed_tools: list[str] | None = None
@@ -274,6 +275,7 @@ class RouterConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     endpoints: list[Endpoint]
+    max_request_body_bytes: int = Field(default=1_048_576, ge=1024, le=67_108_864)
 
     @model_validator(mode="after")
     def validate_ports_and_paths(self) -> RouterConfig:
