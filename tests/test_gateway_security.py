@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import MutableMapping
+from typing import Any
+
 import httpx
 import pytest
 from pydantic import SecretStr
@@ -14,7 +17,11 @@ from mcp_router.core.security import (
 )
 
 
-async def _ok_app(scope: dict, receive: ASGIReceive, send: ASGISend) -> None:
+async def _ok_app(
+    scope: MutableMapping[str, Any],
+    receive: ASGIReceive,
+    send: ASGISend,
+) -> None:
     response = JSONResponse({"ok": True})
     await response(scope, receive, send)
 
