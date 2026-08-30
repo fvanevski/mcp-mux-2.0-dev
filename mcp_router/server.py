@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from urllib.parse import urlparse, urlunparse
@@ -14,26 +14,38 @@ from uuid import uuid4
 import httpx
 import yaml
 from starlette.applications import Starlette
-from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import ClientDisconnect, Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from mcp_router.core.config_loader import (
     ConfigWatcher,
     Endpoint,
+    ManagedEndpointConfig,
     RouterConfig,
+    SecurityConfig,
     load_router_config,
 )
+from mcp_router.core.limits import LimitLease, RequestLimiter
+from mcp_router.core.policy import CapabilityPolicy
 from mcp_router.core.process_manager import ProcessManager
 from mcp_router.core.protocol import (
+    CAPABILITY_DENIED,
     INVALID_REQUEST,
     MODERN_PROTOCOL_VERSION,
+    REQUEST_LIMITED,
     ParsedJSONRPCRequest,
     ProtocolEra,
     ProtocolRequestError,
     build_jsonrpc_error,
+    extract_request_name,
     parse_jsonrpc_request,
     validate_protocol_request,
+)
+from mcp_router.core.redaction import SecretRedactor
+from mcp_router.core.security import (
+    GatewaySecurityMiddleware,
+    build_upstream_headers,
+    sanitize_response_headers,
 )
 from mcp_router.core.sse import iter_sse_events, render_sse_event, transform_sse_event
 
@@ -97,49 +109,35 @@ def filter_tools_response(
     allowed_tools: list[str] | None,
     denied_tools: list[str] | None,
 ) -> str:
-    """Project tools/list results without changing unrelated JSON/SSE data."""
-    if allowed_tools is None and denied_tools is None:
-        return line_or_body
-
-    prefix = ""
-    json_str = line_or_body
-    if line_or_body.startswith("data: "):
-        prefix = "data: "
-        json_str = line_or_body[6:].strip()
-
-    try:
-        data = json.loads(json_str)
-        if isinstance(data, dict) and "result" in data:
-            result = data["result"]
-            if isinstance(result, dict) and "tools" in result and isinstance(result["tools"], list):
-                original_tools = result["tools"]
-                filtered_tools = []
-                if allowed_tools is not None:
-                    allowed_set = set(allowed_tools)
-                    filtered_tools = [tool for tool in original_tools if tool.get("name") in allowed_set]
-                elif denied_tools is not None:
-                    denied_set = set(denied_tools)
-                    filtered_tools = [tool for tool in original_tools if tool.get("name") not in denied_set]
-                else:
-                    filtered_tools = original_tools
-
-                result["tools"] = filtered_tools
-                data["result"] = result
-                return f"{prefix}{json.dumps(data)}"
-    except (AttributeError, json.JSONDecodeError, TypeError):
-        return line_or_body
-    return line_or_body
+    """Compatibility wrapper around the same policy source used for direct calls."""
+    policy = CapabilityPolicy(
+        allowed_tools=None if allowed_tools is None else frozenset(allowed_tools),
+        denied_tools=None if denied_tools is None else frozenset(denied_tools),
+    )
+    projected, _ = policy.project_json_text(
+        line_or_body,
+        principal="compatibility",
+        endpoint="compatibility",
+    )
+    return projected
 
 
 def build_response_headers(
     headers: Mapping[str, str],
     exclude_headers: set[str],
     body_was_decoded: bool = False,
+    body_was_transformed: bool = False,
 ) -> dict[str, str]:
-    skipped = set(exclude_headers)
-    if body_was_decoded:
-        skipped.update({"content-encoding", "content-length"})
-    return {key: value for key, value in headers.items() if key.lower() not in skipped}
+    sanitized = sanitize_response_headers(
+        headers,
+        body_was_decoded=body_was_decoded,
+        body_was_transformed=body_was_transformed,
+    )
+    return {
+        key: value
+        for key, value in sanitized.items()
+        if key.casefold() not in exclude_headers
+    }
 
 
 def _jsonrpc_error_response(error: ProtocolRequestError) -> JSONResponse:
@@ -185,6 +183,28 @@ def _rewrite_legacy_endpoint_data(data: str, path_prefix: str) -> str:
     return f"/{path_prefix}{data}"
 
 
+def _endpoint_requires_runtime_reset(previous: Endpoint, candidate: Endpoint) -> bool:
+    if previous.mode != candidate.mode:
+        return True
+    if (
+        previous.url != candidate.url
+        or previous.transport != candidate.transport
+        or previous.legacy_sse_bridge != candidate.legacy_sse_bridge
+    ):
+        return True
+    if isinstance(previous, ManagedEndpointConfig) and isinstance(candidate, ManagedEndpointConfig):
+        return any(
+            (
+                previous.argv != candidate.argv,
+                previous.env != candidate.env,
+                previous.cwd != candidate.cwd,
+                previous.readiness != candidate.readiness,
+                previous.unsafe_shell_command != candidate.unsafe_shell_command,
+            )
+        )
+    return False
+
+
 class MCPRouter:
     def __init__(self, app: Starlette, config_path: str):
         self.app = app
@@ -199,7 +219,14 @@ class MCPRouter:
         self._running = False
         self._checker_task: asyncio.Task[None] | None = None
         self._http_client: httpx.AsyncClient | None = None
+        self.security_config = SecurityConfig()
+        self._redactor = SecretRedactor()
+        self._limiter = RequestLimiter()
 
+        self.app.add_middleware(
+            GatewaySecurityMiddleware,
+            get_config=lambda: self.security_config,
+        )
         self.app.add_route(
             "/summary",
             self.get_summary,
@@ -233,13 +260,16 @@ class MCPRouter:
     def apply_configuration(self, config: RouterConfig) -> None:
         new_endpoints = {endpoint.path: endpoint for endpoint in config.endpoints}
         self.max_request_body_bytes = config.max_request_body_bytes
+        self.security_config = config.security
+        self._redactor = SecretRedactor.from_router_config(config)
+        self.process_manager.set_redactor(self._redactor.redact)
 
         to_stop: list[str] = []
         for path in list(self._configs):
             if path not in new_endpoints:
                 to_stop.append(path)
-            elif self._configs[path] != new_endpoints[path]:
-                logger.info("Config for %s changed, stopping it.", path)
+            elif _endpoint_requires_runtime_reset(self._configs[path], new_endpoints[path]):
+                logger.info("Runtime-affecting config for %s changed, stopping it.", path)
                 to_stop.append(path)
 
         for path in to_stop:
@@ -371,16 +401,48 @@ class MCPRouter:
         return None
 
     def _forward_headers(self, request: Request, endpoint: Endpoint) -> dict[str, str]:
+        headers = build_upstream_headers(request.headers, endpoint)
+        identity_header = self.security_config.trusted_proxy_identity_header.casefold()
         headers = {
             key: value
-            for key, value in request.headers.items()
-            if key.lower() not in _HOP_BY_HOP_REQUEST_HEADERS
+            for key, value in headers.items()
+            if key.casefold() != identity_header
         }
-        if endpoint.headers:
-            headers.update(endpoint.headers)
         if endpoint.transport == "streamable-http" and request.method in {"POST", "DELETE"}:
             headers["accept"] = "application/json, text/event-stream"
         return headers
+
+    @staticmethod
+    def _principal(request: Request) -> str:
+        scope = getattr(request, "scope", {})
+        if isinstance(scope, dict):
+            principal = scope.get("mcp.principal")
+            if isinstance(principal, str) and principal:
+                return principal
+        return "local"
+
+    async def _finish_limited_response(
+        self,
+        response: Response,
+        lease: LimitLease | None,
+    ) -> Response:
+        if lease is None:
+            return response
+        if not isinstance(response, StreamingResponse):
+            await lease.release()
+            return response
+
+        original_iterator = response.body_iterator
+
+        async def limited_iterator() -> AsyncIterator[bytes | str]:
+            try:
+                async for chunk in original_iterator:
+                    yield chunk
+            finally:
+                await lease.release()
+
+        response.body_iterator = limited_iterator()
+        return response
 
     async def sse_proxy_generator(
         self,
