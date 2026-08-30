@@ -437,7 +437,7 @@ class MCPRouter:
 
         original_iterator = response.body_iterator
 
-        async def limited_iterator() -> AsyncIterator[bytes | str]:
+        async def limited_iterator() -> AsyncIterator[bytes | memoryview | str]:
             try:
                 async for chunk in original_iterator:
                     yield chunk

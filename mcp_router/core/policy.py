@@ -93,9 +93,8 @@ class CapabilityPolicy:
         elif method == "prompts/get":
             allowed_names, denied_names = self.allowed_prompts, self.denied_prompts
 
-        if allowed_names is not None:
-            if name is None or name not in allowed_names:
-                return PolicyDecision(False, principal, endpoint, method, name, "capability is not allowed")
+        if allowed_names is not None and (name is None or name not in allowed_names):
+            return PolicyDecision(False, principal, endpoint, method, name, "capability is not allowed")
         if denied_names is not None and name is not None and name in denied_names:
             return PolicyDecision(False, principal, endpoint, method, name, "capability is denied")
         return PolicyDecision(True, principal, endpoint, method, name)
