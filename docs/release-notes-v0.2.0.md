@@ -8,14 +8,15 @@
 - Hardens and bounds the deprecated local legacy SSE compatibility adapter.
 - Adds payload-free structured request logs, request IDs, supported trace-context propagation, `/metrics`, and expanded `/summary` operational state.
 - Reorganizes the test suite into focused configuration, protocol, policy, proxy, streaming, process, reload, security, and integration coverage.
-- Adds Python 3.13/3.14 CI, Ruff, Pyrefly, unit/integration jobs, `pip-audit 2.10.1`, and official MCP conformance `v0.1.16` against a proxied official Everything server.
+- Adds Python 3.13/3.14 CI, Ruff, Pyrefly, unit/integration jobs, `pip-audit 2.10.1`, and official MCP conformance `0.2.0-alpha.11` against the Python MCP SDK 2.1.1 Everything server pinned at commit `0921d94a74db900dccd2d534842aa7b6160542d2`.
 
 ## Dependency baseline
 
 - Python package version: `0.2.0`
 - MCP Python SDK: `mcp>=2.1.1,<3` (release lock: `2.1.1`)
-- Official conformance runner: `@modelcontextprotocol/conformance@0.1.16`
-- Official Everything test server: `@modelcontextprotocol/server-everything@2.0.0`
+- Official conformance runner: `@modelcontextprotocol/conformance@0.2.0-alpha.11`
+- Official Everything test server: Python MCP SDK 2.1.1 `mcp-everything-server`, source pinned at `0921d94a74db900dccd2d534842aa7b6160542d2`
+- Referee baseline: exactly `server-stateless:sep-2575-server-unsupported-version-error`, limited to fixture-internal metrics correlation for gateway-terminated unsupported-version traffic
 
 ## Breaking changes
 

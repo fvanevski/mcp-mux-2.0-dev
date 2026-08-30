@@ -18,7 +18,7 @@ Phase 0 introduced this runner and the initial CI ratchet as an **intentional va
 - `Unit tests (Python 3.13)` and `Unit tests (Python 3.14)`: the non-integration regression corpus;
 - `Integration tests (Python 3.13)` and `Integration tests (Python 3.14)`: compatibility, legacy lifecycle, and observability integration coverage;
 - `Dependency audit`: locked runtime dependencies audited with `pip-audit 2.10.1`;
-- `MCP conformance (2026-07-28)`: official `@modelcontextprotocol/conformance@0.1.16` run through the mux against pinned official `@modelcontextprotocol/server-everything@2.0.0`.
+- `MCP conformance (2026-07-28)`: official `@modelcontextprotocol/conformance@0.2.0-alpha.11` requirements run through the mux against the Python MCP SDK 2.1.1 Everything server pinned at commit `0921d94a74db900dccd2d534842aa7b6160542d2`. The only expected-failure baseline is `server-stateless:sep-2575-server-unsupported-version-error`, where the mux correctly terminates the unsupported version at its gateway boundary but the referee additionally expects upstream fixture-internal metrics that cannot exist for an intercepted request.
 
 The supported Python MCP SDK line is current stable v2; the v0.2.0 manifest requires `mcp>=2.1.1,<3`, with the release lock resolving `2.1.1`.
 
