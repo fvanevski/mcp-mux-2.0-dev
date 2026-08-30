@@ -443,7 +443,8 @@ async def test_streamable_http_sse_get_opens_local_sse_bridge_when_enabled():
     session = next(iter(router._legacy_bridge.sessions.values()))
     assert session.path_prefix == "huggingface"
     mock_stream.assert_not_called()
-    await response.body_iterator.aclose()
+    assert router._legacy_bridge is not None
+    await router._legacy_bridge.close_all()
 
 
 # --- Tool Filtering Tests ---

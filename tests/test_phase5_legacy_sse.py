@@ -4,7 +4,7 @@ import asyncio
 import json
 import subprocess
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -78,7 +78,7 @@ def _request(
 async def _open_bridge(
     router: MCPRouter,
     path_prefix: str,
-) -> tuple[LegacySSEBridge, BridgeSession, AsyncIterator[bytes]]:
+) -> tuple[LegacySSEBridge, BridgeSession, AsyncGenerator[bytes, None]]:
     response = await router.catch_all_proxy(
         _request(
             "GET",
@@ -94,7 +94,7 @@ async def _open_bridge(
         for session in bridge.sessions.values()
         if session.path_prefix == path_prefix
     )
-    iterator = cast(AsyncIterator[bytes], response.body_iterator)
+    iterator = cast(AsyncGenerator[bytes, None], response.body_iterator)
     endpoint_event = await anext(iterator)
     assert f"/{path_prefix}?session_id={session.session_id}".encode() in endpoint_event
     return bridge, session, iterator
@@ -412,7 +412,7 @@ async def test_upstream_http_failure_is_synchronous_and_observable() -> None:
     router = MCPRouter(Starlette(), "unused")
     endpoint = _endpoint(path="legacy", bridge={"max_sessions": 2})
     router._configs = {"legacy": endpoint}
-    bridge, session, iterator = await _open_bridge(router, "legacy")
+    _bridge, session, iterator = await _open_bridge(router, "legacy")
 
     upstream_response = MagicMock()
     upstream_response.status_code = 503
@@ -442,14 +442,14 @@ async def test_upstream_http_failure_is_synchronous_and_observable() -> None:
 
     assert response.status_code == 502
     assert response.body
-    payload = json.loads(response.body)
+    payload = json.loads(bytes(response.body))
     assert payload["upstream_status"] == 503
     assert "upstream overloaded" in payload["detail"]
     assert session.runtime.active_leases == 0
     stream_context.__aexit__.assert_awaited_once_with(None, None, None)
 
     summary = await router.get_summary(MagicMock())
-    summary_payload = json.loads(summary.body)
+    summary_payload = json.loads(bytes(summary.body))
     bridge_summary = summary_payload["endpoints"][0]["legacy_sse_bridge"]
     assert bridge_summary["enabled"] is True
     assert bridge_summary["active_sessions"] == 1

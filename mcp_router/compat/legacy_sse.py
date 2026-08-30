@@ -6,6 +6,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
+from typing import Protocol
 
 import httpx
 from starlette.requests import Request
@@ -50,8 +51,19 @@ class ClosedSession:
     message: str
 
 
+class _StreamContext(Protocol):
+    async def __aenter__(self) -> httpx.Response: ...
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: object | None,
+    ) -> object: ...
+
+
 class _TrackedUpstream:
-    def __init__(self, context: object) -> None:
+    def __init__(self, context: _StreamContext) -> None:
         self._context = context
         self._closed = False
         self._lock = asyncio.Lock()
@@ -61,8 +73,7 @@ class _TrackedUpstream:
             if self._closed:
                 return
             self._closed = True
-            exit_method = getattr(self._context, "__aexit__")
-            await exit_method(None, None, None)
+            await self._context.__aexit__(None, None, None)
 
 
 @dataclass(eq=False)
@@ -249,7 +260,6 @@ class LegacySSEBridge:
             forward_headers.pop("mcp-session-id", None)
         forward_headers["accept"] = "application/json, text/event-stream"
 
-        stream_context: object | None = None
         try:
             client = await self._client_provider()
             stream_context = client.stream(
@@ -261,7 +271,7 @@ class LegacySSEBridge:
                 timeout=httpx.Timeout(endpoint.upstream_timeout, read=None),
             )
             response = await asyncio.wait_for(
-                getattr(stream_context, "__aenter__")(),
+                stream_context.__aenter__(),
                 timeout=endpoint.upstream_timeout,
             )
         except (
@@ -422,40 +432,37 @@ class LegacySSEBridge:
             await self._close_session_object(session)
 
     async def _expiry_loop(self, session: BridgeSession) -> None:
-        try:
-            while not session.closed.is_set():
-                delay = max(0.0, session.expires_at - time.monotonic())
-                sleep_task = asyncio.create_task(asyncio.sleep(delay))
-                activity_task = asyncio.create_task(session.activity.wait())
-                closed_task = asyncio.create_task(session.closed.wait())
-                done, pending = await asyncio.wait(
-                    {sleep_task, activity_task, closed_task},
-                    return_when=asyncio.FIRST_COMPLETED,
+        while not session.closed.is_set():
+            delay = max(0.0, session.expires_at - time.monotonic())
+            sleep_task = asyncio.create_task(asyncio.sleep(delay))
+            activity_task = asyncio.create_task(session.activity.wait())
+            closed_task = asyncio.create_task(session.closed.wait())
+            done, pending = await asyncio.wait(
+                {sleep_task, activity_task, closed_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            if closed_task in done and session.closed.is_set():
+                return
+            if activity_task in done and session.activity.is_set():
+                session.activity.clear()
+                continue
+            if time.monotonic() >= session.expires_at:
+                self._metric(session.path_prefix).expired_sessions_total += 1
+                await self._mark_terminal(
+                    session,
+                    status_code=410,
+                    code="session_expired",
+                    message="Legacy SSE session expired",
                 )
-                for task in pending:
-                    task.cancel()
-                if pending:
-                    await asyncio.gather(*pending, return_exceptions=True)
-                if closed_task in done and session.closed.is_set():
-                    return
-                if activity_task in done and session.activity.is_set():
-                    session.activity.clear()
-                    continue
-                if time.monotonic() >= session.expires_at:
-                    self._metric(session.path_prefix).expired_sessions_total += 1
-                    await self._mark_terminal(
-                        session,
-                        status_code=410,
-                        code="session_expired",
-                        message="Legacy SSE session expired",
-                    )
-                    await self._close_session_object(
-                        session,
-                        exclude_task=asyncio.current_task(),
-                    )
-                    return
-        except asyncio.CancelledError:
-            raise
+                await self._close_session_object(
+                    session,
+                    exclude_task=asyncio.current_task(),
+                )
+                return
 
     async def _stream_session(self, session: BridgeSession) -> AsyncIterator[bytes]:
         disconnected = False
@@ -619,4 +626,4 @@ class LegacySSEBridge:
             },
             separators=(",", ":"),
         )
-        return f"event: error\ndata: {payload}\n\n".encode("utf-8")
+        return f"event: error\ndata: {payload}\n\n".encode()
