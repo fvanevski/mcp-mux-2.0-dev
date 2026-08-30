@@ -601,7 +601,7 @@ async def test_proxy_strips_encoding_headers_from_decoded_json_response():
     import httpx
     from httpx import AsyncClient
     transport = httpx.ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(transport=transport, base_url="http://localhost") as client:
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.headers = httpx.Headers({
@@ -644,7 +644,7 @@ async def test_streamable_http_direct_post_accepts_json_only_clients():
     import httpx
     from httpx import AsyncClient
     transport = httpx.ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(transport=transport, base_url="http://localhost") as client:
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.headers = httpx.Headers({"content-type": "application/json"})
@@ -681,7 +681,7 @@ async def test_streamable_http_direct_post_rejects_missing_jsonrpc_version():
     import httpx
     from httpx import AsyncClient
     transport = httpx.ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(transport=transport, base_url="http://localhost") as client:
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.headers = httpx.Headers({"content-type": "application/json"})
@@ -718,7 +718,7 @@ async def test_streamable_http_direct_post_rejects_jsonrpc_batch():
     import httpx
     from httpx import AsyncClient
     transport = httpx.ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(transport=transport, base_url="http://localhost") as client:
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.headers = httpx.Headers({"content-type": "application/json"})
@@ -760,7 +760,7 @@ async def test_sse_message_post_uses_upstream_message_path():
     import httpx
     from httpx import AsyncClient
     transport = httpx.ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(transport=transport, base_url="http://localhost") as client:
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.headers = httpx.Headers({"content-type": "application/json"})
