@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -8,6 +9,13 @@ import httpx
 import pytest
 
 from mcp_router.core.config_loader import EndpointConfig
+from mcp_router.core.observability import (
+    ASGIMessage,
+    ASGIReceive,
+    ASGISend,
+    GatewayMetrics,
+    GatewayObservabilityMiddleware,
+)
 from mcp_router.core.protocol import (
     CLIENT_CAPABILITIES_META,
     MODERN_PROTOCOL_VERSION,
@@ -54,6 +62,51 @@ def _json_stream(payload: bytes, *, status_code: int = 200):
     stream.__aenter__ = AsyncMock(return_value=response)
     stream.__aexit__ = AsyncMock(return_value=None)
     return stream
+
+
+@pytest.mark.asyncio
+async def test_stream_cancellation_increments_metric_and_records_cancelled_outcome(caplog):
+    metrics = GatewayMetrics()
+
+    async def cancelled_app(
+        scope: ASGIMessage,
+        receive: ASGIReceive,
+        send: ASGISend,
+    ) -> None:
+        del receive, send
+        scope["mcp.endpoint"] = "weather"
+        raise asyncio.CancelledError
+
+    async def receive() -> ASGIMessage:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    sent: list[ASGIMessage] = []
+
+    async def send(message: ASGIMessage) -> None:
+        sent.append(message)
+
+    middleware = GatewayObservabilityMiddleware(cancelled_app, metrics=metrics)
+    scope: ASGIMessage = {
+        "type": "http",
+        "method": "GET",
+        "path": "/weather",
+        "headers": [],
+    }
+    caplog.set_level(logging.INFO, logger="mcp_router.requests")
+
+    with pytest.raises(asyncio.CancelledError):
+        await middleware(scope, receive, send)
+
+    assert sent == []
+    assert metrics.snapshot("weather")["stream_cancellations_total"] == 1
+    records = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == "mcp_router.requests"
+    ]
+    assert records[-1]["endpoint"] == "weather"
+    assert records[-1]["status"] == 499
+    assert records[-1]["cancelled"] is True
 
 
 @pytest.mark.asyncio

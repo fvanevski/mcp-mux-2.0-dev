@@ -1,6 +1,6 @@
 # Endpoint configuration contract
 
-`mcp_router/config.yaml` is validated before an endpoint definition can become active. The accepted endpoint modes are intentionally limited to behavior implemented by the router: `remote` and `managed_cli`. Historical `stdio_bridge` configuration is rejected.
+By default the router loads `mcp_router/config.yaml`; `MCP_MUX_CONFIG` may select an alternate configuration path for controlled deployments and validation fixtures. Whichever path is selected is environment-expanded and validated before an endpoint definition can become active. The accepted endpoint modes are intentionally limited to behavior implemented by the router: `remote` and `managed_cli`. Historical `stdio_bridge` configuration is rejected.
 
 At router scope, `max_request_body_bytes` bounds JSON-RPC POST bodies before they can be forwarded. It defaults to 1 MiB (`1048576`) and accepts values from 1 KiB through 64 MiB. The limit applies after any declared `Content-Length` precheck and again while the actual request body is streamed.
 
@@ -15,7 +15,7 @@ security:
   allowed_origins: []
 ```
 
-`local_only` requires a loopback immediate peer, validates the `Host` header against `allowed_hosts`, and rejects every present `Origin` that is not explicitly listed. The command-line launcher also refuses a non-loopback `--host` while this mode is active. There is no wildcard credentialed CORS path. Do not place `local_only` behind an externally reachable reverse proxy: a same-host proxy is itself a loopback peer and therefore cannot preserve the local-only trust boundary. Any externally reachable or reverse-proxied deployment must use `authenticated` mode.
+`local_only` requires a loopback immediate peer and validates the `Host` header against `allowed_hosts`. A present `Origin` is accepted when it is explicitly listed or when it is a structurally valid `http`/`https` loopback origin (`localhost` or a loopback IP, with any port and no credentials, query, or fragment); non-loopback Origins are rejected. This permits local browser clients and the official conformance fixture without broadening the network trust boundary. The command-line launcher also refuses a non-loopback `--host` while this mode is active. There is no wildcard credentialed CORS path. Do not place `local_only` behind an externally reachable reverse proxy: a same-host proxy is itself a loopback peer and therefore cannot preserve the local-only trust boundary. Any externally reachable or reverse-proxied deployment must use `authenticated` mode.
 
 Non-local binding requires `security.mode: authenticated` and at least one explicit authentication provider. Direct callers may authenticate with a gateway API key supplied as `Authorization: Bearer <key>`:
 
