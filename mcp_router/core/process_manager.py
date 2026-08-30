@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import signal
+from collections.abc import Callable
 
 from .config_loader import ManagedEndpointConfig
 
@@ -22,12 +23,16 @@ class ProcessManager:
             cls._instance = super().__new__(cls)
             cls._instance._processes = {}
             cls._instance._log_tasks = []
+            cls._instance._redact = lambda text: text
         return cls._instance
 
     def __init__(self):
         if hasattr(self, "_initialized"):
             return
         self._initialized = True
+
+    def set_redactor(self, redactor: Callable[[str], str]) -> None:
+        self._redact = redactor
 
     def is_running(self, path: str) -> bool:
         proc = self._processes.get(path)
@@ -147,7 +152,7 @@ class ProcessManager:
                 if not line:
                     break
                 decoded = line.decode("utf-8", errors="replace").rstrip()
-                logger.info("[%s] %s", prefix, decoded)
+                logger.info("[%s] %s", prefix, self._redact(decoded))
         except asyncio.CancelledError:
             pass
         except (OSError, RuntimeError) as exc:
