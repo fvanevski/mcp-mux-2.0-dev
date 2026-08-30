@@ -55,12 +55,18 @@ The frozen branch `mcp_router/config.yaml` independently establishes four active
 
 Evidence:
 
-- `legacy_sse_bridge` defaults to `false`;
+- `legacy_sse_bridge` is absent/disabled by default and requires an explicit bounded mapping when enabled;
 - no active frozen-branch endpoint enables it;
 - no operator-verified concrete client is recorded as requiring it;
 - current coverage exercises it only as a compatibility adapter.
 
-This is a bounded statement about the available evidence, not proof that no unknown external deployment exists. Later telemetry work must precede removal.
+This is a bounded statement about the available evidence, not proof that no unknown external deployment exists. Phase 5 adds `/summary` utilization/failure counters so any later removal decision can use deployment evidence rather than assumption.
+
+### Phase 5 compatibility resolution
+
+Issue #8 keeps the mux-local SSE adapter as a **deprecated, explicit compatibility surface** rather than part of canonical Streamable HTTP. The adapter is lazy-loaded only for configured bridge traffic; ordinary modern and transparent legacy Streamable HTTP do not instantiate bridge state. Per-endpoint configuration bounds queue capacity, backpressure wait, session TTL, and maximum sessions. Disconnect, expiry, endpoint retirement, backpressure failure, and shutdown close adapter-owned tasks/upstream streams and remove session state. Synchronous upstream setup/rejection failures return meaningful HTTP errors; asynchronous response failures terminate the downstream SSE stream with an error event. `/summary` exposes active-session, use, rejection, expiry, upstream-failure, and backpressure counters.
+
+The stdio decision is also fail-closed: current endpoint configuration accepts only `remote` and `managed_cli`; `stdio_bridge` is rejected until a complete end-to-end adapter exists. This avoids an accepted schema mode with no production implementation or an undocumented dependency on an external HTTP bridge.
 
 ## Canonical target contract for MCP `2026-07-28`
 
@@ -132,12 +138,14 @@ The fixture remains the deterministic oracle for a correct modern peer. Phase 2 
 
 | Claim ID | Baseline claim | Classification | Test evidence |
 |---|---|---|---|
-| `BR-01` | Bridge is opt-in; normal Streamable HTTP SSE GET does not create local bridge state. | Current + target | existing `test_streamable_http_sse_get_preserves_upstream_streamable_http` |
-| `BR-02` | Enabling the bridge creates a local endpoint/session flow. | Current compatibility | existing bridge tests |
-| `BR-03` | Bridge captures/reuses upstream session identity for bridge POSTs. | Current compatibility | existing `test_streamable_http_direct_response_json` |
-| `BR-04` | Cross-endpoint bridge-session reuse is rejected. | Preservation invariant | existing cross-endpoint regression |
-| `BR-05` | Removing/changing an endpoint drops its bridge sessions. | Current reload invariant | existing configuration regression |
-| `BR-06` | Bridge resources become bounded/cancellable/observable. | Future target | Phase 5 |
+| `BR-01` | Bridge is opt-in and lazy; ordinary modern/transparent Streamable HTTP does not instantiate local bridge state. | Current Phase 5 | `test_modern_streamable_http_never_instantiates_bridge_state` + compatibility-baseline stateless assertions |
+| `BR-02` | Enabling the bridge requires an explicit bounded mapping and creates an endpoint-owned local session flow. | Current compatibility | `test_legacy_bridge_requires_explicit_bounded_mapping` + `test_streamable_http_sse_get_opens_local_sse_bridge_when_enabled` |
+| `BR-03` | Bridge captures/reuses upstream session identity for bridge POSTs. | Current compatibility | `test_streamable_http_direct_response_json` |
+| `BR-04` | Cross-endpoint bridge-session reuse is rejected. | Preservation invariant | `test_bridge_session_cannot_cross_endpoint_boundary` + `test_streamable_http_rejects_session_for_different_endpoint` |
+| `BR-05` | Removing/changing an endpoint drops its bridge sessions while unchanged endpoints retain theirs. | Current reload invariant | `test_apply_configuration_drops_sessions_for_removed_or_changed_endpoint` + Phase 4 retirement regressions |
+| `BR-06` | Queues, backpressure, TTL, and session admission are bounded and deterministic. | Current Phase 5 | `test_bridge_queue_is_bounded_and_backpressure_fails_closed`, `test_bridge_ttl_expires_session_and_rejects_replay`, `test_bridge_session_limit_rejects_excess_admission` |
+| `BR-07` | Disconnect/retirement owns cancellation and upstream cleanup; failures are client-observable. | Current Phase 5 | `test_bridge_disconnect_cancels_response_and_closes_upstream`, `test_upstream_http_failure_is_synchronous_and_observable`, `test_async_upstream_failure_reaches_downstream_error_event` |
+| `BR-08` | Bridge utilization/failure counters are exposed without activating the bridge for normal traffic. | Current Phase 5 | Phase 5 `/summary` assertions + modern-path lazy-adapter regression |
 
 ### E. Protocol validation and response projection
 
@@ -156,8 +164,10 @@ The fixture remains the deterministic oracle for a correct modern peer. Phase 2 
 |---|---|---|---|
 | `RUN-01` | Remote endpoints proxy without local process startup. | Current architecture | compatibility tests |
 | `RUN-02` | `managed_cli` is distinct and frozen Firecrawl remains managed. | Current architecture | configured-upstream regression |
-| `RUN-03` | Managed startup uses configured command and TCP readiness. | Current behavior | existing process-manager regression |
-| `RUN-04` | Runtime reload/idle behavior becomes transactional/lease-based. | Future target | Phase 4 |
+| `RUN-03` | Managed startup has production lifecycle coverage, including a real disposable managed subprocess. | Current behavior | `test_process_manager_lifecycle` + `test_cleanup_leaves_no_real_managed_subprocess_alive` |
+| `RUN-04` | Runtime reload/idle behavior is transactional/lease-based. | Current Phase 4 | Phase 4 runtime regressions |
+| `RUN-05` | Every accepted endpoint mode is implemented: `remote` uses the proxy path and `managed_cli` adds supervisor-owned process lifecycle. | Current Phase 5 | modern remote compatibility scenarios + managed runtime/process regressions |
+| `RUN-06` | `stdio_bridge` is not an accepted endpoint mode and fails configuration validation. | Current Phase 5 | `test_unimplemented_or_unknown_modes_are_rejected[stdio_bridge]` |
 
 ## Deterministic mock upstream authority
 
@@ -199,7 +209,7 @@ The v0.2.0 phases intentionally:
 - harden Host/Origin/caller authentication;
 - replace managed-process/reload heuristics with explicit runtime state;
 - bound and observe the local legacy adapter;
-- implement or reject `stdio_bridge`.
+- reject `stdio_bridge` until a complete end-to-end adapter is implemented.
 
 Tests that encode a behavior being intentionally broken must be reclassified alongside the governing issue, never simply deleted to obtain green status.
 
