@@ -23,7 +23,7 @@
 
 The implementation must now be refactored from a hand-written, partially protocol-translating reverse proxy into a secure, protocol-aware MCP gateway. The gateway must support the MCP `2026-07-28` stateless protocol model while retaining explicitly approved legacy compatibility. It must continue to operate as an ASGI proxy; it must not become a monolithic MCP server that imports and republishes every upstream tool. This architectural direction and the staged issue hierarchy are established in epic #1.
 
-The highest-priority defects are:
+At the refactor baseline, the highest-priority defects were:
 
 1. Tool allowlists affect `tools/list` output but do not prevent direct invocation of hidden tools.
 2. The gateway injects privileged upstream credentials without a complete caller-authentication and request-origin boundary.
@@ -34,7 +34,9 @@ The highest-priority defects are:
 7. `stdio_bridge` is accepted by configuration but is not implemented end to end.
 8. Packaging retains obsolete or unused MCP/FastMCP-era dependencies and modules.
 
-The refactor will proceed through seven implementation phases and four closure gates. Each phase must land through a narrowly scoped pull request or small related PR series. Gate closure requires executable evidence, not merely code-review approval.
+Some baseline defects have already been closed by merged phases. Current phase/gate issues and merged contracts identified in Section 4 are authoritative for remaining work and completion state.
+
+The refactor proceeds through seven implementation phases and four closure gates. Each phase lands through a narrowly scoped pull request or small related PR series. Gate closure requires executable evidence, not merely code-review approval.
 
 ---
 
@@ -1400,6 +1402,8 @@ The `2026-07-28` specification documents trace-context propagation and cache met
 
 # 15. Priority implementation sequence
 
+This section records the original phase sequence and deliverable plan. Use current GitHub issue/gate state for completion status and current branch/PR instructions.
+
 The GitHub issue flow is:
 
 ```text
@@ -1934,14 +1938,14 @@ These decisions must be resolved in the identified phase.
 ## OD-1: Exact Python SDK v2 version
 
 **Phase:** 1
-**Status:** UNVERIFIED
-**Resolution evidence:** official release source plus committed lockfile.
+**Status:** RESOLVED
+**Resolution:** `mcp>=2,<3` with committed `uv.lock` resolving `mcp==2.1.1`; Issue #4 and Gate A (#10) closed with evidence.
 
 ## OD-2: Actual legacy bridge consumers
 
 **Phase:** 0
-**Status:** unknown
-**Resolution:** identify clients or mark bridge provisionally unused.
+**Status:** RESOLVED FOR BASELINE
+**Resolution:** no concrete client requiring the optional local SSE bridge was identified; ADR-001 records it as provisionally unused pending new deployment evidence.
 
 ## OD-3: Initial non-local authentication mode
 
