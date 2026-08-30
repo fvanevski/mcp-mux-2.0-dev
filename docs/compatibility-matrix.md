@@ -157,6 +157,8 @@ The fixture remains the deterministic oracle for a correct modern peer. Phase 2 
 | `CUR-03` | Current tool policy projects `tools/list` with allow/deny lists. | Current behavior | existing filter tests |
 | `CUR-04` | Tool-list projection does not prove direct-call authorization. | Known security defect | Phase 3 |
 | `CUR-05` | Rebuilt JSON responses strip stale encoding/length headers. | Current response-safety behavior | existing regression |
+| `CUR-06` | An upstream that labels a response `application/json` but returns malformed JSON is contained at the gateway as HTTP 502 rather than forwarded as a successful malformed MCP response. | Phase 6 release hardening | `test_negative_upstream_fixtures_fail_closed_and_are_observable[malformed-json]` |
+| `CUR-07` | Deterministic upstream HTTP 503 and transport failures are client-observable and increment the endpoint upstream-error counter exactly once. | Phase 6 release hardening | `test_negative_upstream_fixtures_fail_closed_and_are_observable[http-503]` + `[transport-failure]` |
 
 ### F. Managed and remote endpoint behavior
 
@@ -171,15 +173,18 @@ The fixture remains the deterministic oracle for a correct modern peer. Phase 2 
 
 ## Deterministic mock upstream authority
 
-`tests/fixtures/mock_upstream.py` provides three in-process `httpx.MockTransport` modes:
+`tests/fixtures/mock_upstream.py` provides six in-process `httpx.MockTransport` modes:
 
 | Mode | Contract |
 |---|---|
 | `modern-stateless` | Validates required `2026-07-28` per-request metadata, protocol/method/name header agreement, correct `resources/read` URI routing, and modern result/tool shapes; it does not use legacy session headers as modern state. |
 | `legacy-sessionful` | Returns a deterministic session ID from `initialize` and requires it on later legacy requests. |
 | `legacy-http-sse` | Emits a deterministic endpoint event and accepts the corresponding legacy message POST. |
+| `malformed-json` | Returns a deterministic `application/json` response with invalid JSON framing so the gateway's fail-closed upstream-response handling is exercised. |
+| `http-failure` | Returns a deterministic HTTP 503 JSON-RPC error so status/error propagation and upstream-error metrics are exercised. |
+| `transport-failure` | Raises a deterministic `httpx.ConnectError` so transport-failure containment and upstream-error metrics are exercised. |
 
-These fixtures make no live network calls and remain deterministic compatibility oracles. Phase 6 supplements them with the official MCP conformance runner against an official Everything server proxied through the mux; conformance does not replace the fixture-level negative and compatibility regressions.
+These fixtures make no live network calls and remain deterministic compatibility oracles. Phase 6 supplements them with the official MCP conformance runner against an official Everything server proxied through the mux; conformance does not replace the fixture-level negative and compatibility regressions. The negative fixture regression requires malformed JSON to fail closed as gateway HTTP 502 without exposing the malformed body, while deterministic HTTP and transport failures remain observable through `upstream_errors_total`.
 
 ## Preservation invariants
 

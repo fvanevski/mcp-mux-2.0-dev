@@ -1174,6 +1174,7 @@ async def test_restart_backoff_revalidates_in_place_policy_before_start(
         await backoff_started.wait()
 
         assert runtime.restart_attempts == 2
+        assert runtime.process_restarts_total == 0
         await router.apply_configuration(replacement)
         assert router._runtimes[endpoint.path] is runtime
         assert runtime.config is replacement_endpoint
@@ -1184,6 +1185,7 @@ async def test_restart_backoff_revalidates_in_place_policy_before_start(
     start_locked.assert_not_awaited()
     assert runtime.state is RuntimeState.FAILED
     assert runtime.restart_attempts == 2
+    assert runtime.process_restarts_total == 0
     assert runtime.restart_task is None
 
 
@@ -1273,6 +1275,7 @@ async def test_in_place_restart_policy_resumes_failed_supervisor_once(
         await backoff_started.wait()
 
         assert runtime.restart_attempts == 2
+        assert runtime.process_restarts_total == 0
         assert runtime.config is replacement_endpoint
 
         # Reapplying the same permissive policy while recovery is pending must
@@ -1286,6 +1289,7 @@ async def test_in_place_restart_policy_resumes_failed_supervisor_once(
     start_locked.assert_awaited_once_with(runtime, reset_restart_attempts=False)
     assert runtime.state is RuntimeState.RUNNING
     assert runtime.restart_attempts == 2
+    assert runtime.process_restarts_total == 1
     assert runtime.restart_task is None
 
 

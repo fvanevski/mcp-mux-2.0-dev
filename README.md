@@ -16,7 +16,7 @@
 - 🌉 **Deprecated, Bounded Local SSE Compatibility Adapter**: Streamable HTTP endpoints stay on the canonical transport by default. An endpoint may explicitly opt into the legacy local `event: endpoint` flow with bounded queue, backpressure, TTL, and session-count policy.
 - ⚡ **Automatic Transport Auto-Detection**: Dynamically detects the backend transport mode (`streamable-http` vs `sse`) based on URL paths. Sub-servers with `/mcp` or `/mcp/` in their URL automatically default to `streamable-http`.
 - 🛡️ **Session Propagation & Isolation**: For explicitly enabled legacy bridge sessions, maps upstream `Mcp-Session-Id` values to endpoint-owned local sessions, rejects cross-endpoint reuse, and deterministically cleans up expired/disconnected sessions and owned upstream work.
-- 🤝 **Strict Streamable HTTP Client Compatibility**: Normalizes required upstream transport headers while rejecting malformed JSON-RPC and modern protocol/header mismatches rather than repairing invalid request bodies.
+- 🤝 **Strict Streamable HTTP Compatibility**: Normalizes required upstream transport headers, rejects malformed JSON-RPC and modern protocol/header mismatches rather than repairing invalid request bodies, and contains malformed upstream JSON responses as gateway errors instead of forwarding invalid MCP payloads.
 - 🧼 **Decoded Response Header Safety**: Strips stale `Content-Encoding` and upstream `Content-Length` headers when the router reads and rebuilds JSON responses.
 - 📊 **Operational Visibility**: `/summary` exposes endpoint descriptions plus runtime/counter state, while `/metrics` provides focused endpoint state, lease, restart, cancellation, policy-denial, upstream-error, and legacy-bridge counters.
 - 🔎 **Structured Request Diagnostics**: Payload-free JSON logs include request ID, endpoint, protocol revision, method, named capability, result status, duration, bytes streamed, policy outcome, and cancellation state. `X-Request-Id` is returned downstream and supported W3C trace context is propagated upstream without logging raw trace values.
@@ -122,7 +122,7 @@ Configuration values support shell-style environment references before validatio
 | `legacy_sse_bridge` | Mapping | No | Deprecated compatibility adapter for `streamable-http` endpoints only. Omit to disable. When present, configures `queue_capacity`, `backpressure_timeout`, `session_ttl`, and `max_sessions`. |
 | `headers` | Mapping | No | Extra request headers forwarded upstream after environment expansion. |
 | `allowed_tools` | List of Strings | No | Allowlist of tool names. Only these tools are exposed. |
-| `denied_tools` | List of Strings | No | Denylist of tool names. These tools are excluded. (Ignored if `allowed_tools` is set). |
+| `denied_tools` | List of Strings | No | Denylist of tool names. Mutually exclusive with `allowed_tools`; configuring both is rejected. |
 
 ### Streamable HTTP Bridge Behavior
 

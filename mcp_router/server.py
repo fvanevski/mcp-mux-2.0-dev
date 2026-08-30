@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -723,6 +724,15 @@ class MCPRouter:
             finally:
                 await stream_context.__aexit__(None, None, None)
             decoded_body = body_bytes.decode("utf-8", errors="replace")
+            try:
+                json.loads(decoded_body)
+            except json.JSONDecodeError:
+                if response.status_code < 500:
+                    self._metrics.record_upstream_error(path_prefix)
+                return JSONResponse(
+                    {"error": "Upstream returned malformed JSON"},
+                    status_code=502,
+                )
             redacted_body = self._redactor.redact_known_secrets(decoded_body)
             projected_body, policy_changed = policy.project_json_text(
                 redacted_body,

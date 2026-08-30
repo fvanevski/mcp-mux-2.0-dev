@@ -49,7 +49,6 @@ _DEFAULT_UPSTREAM_REQUEST_HEADERS = {
     "last-event-id",
     "traceparent",
     "tracestate",
-    "baggage",
 }
 _SENSITIVE_RESPONSE_HEADERS = {
     "authorization",

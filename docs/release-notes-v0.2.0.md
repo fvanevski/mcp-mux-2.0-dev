@@ -3,11 +3,11 @@
 ## Highlights
 
 - Implements and validates the MCP `2026-07-28` stateless Streamable HTTP gateway contract while retaining explicit legacy compatibility paths.
-- Enforces direct capability policy, credential isolation, Host/Origin/authentication boundaries, and fail-closed protocol/routing validation.
+- Enforces direct capability policy, credential isolation, Host/Origin/authentication boundaries, fail-closed protocol/routing validation, and containment of malformed JSON responses from upstreams.
 - Reworks managed endpoint lifecycle around explicit runtime state, leases, bounded restart policy, transactional reload, and deterministic cleanup.
 - Hardens and bounds the deprecated local legacy SSE compatibility adapter.
 - Adds payload-free structured request logs, request IDs, supported trace-context propagation, `/metrics`, and expanded `/summary` operational state.
-- Reorganizes the test suite into focused configuration, protocol, policy, proxy, streaming, process, reload, security, and integration coverage.
+- Reorganizes the test suite into focused configuration, protocol, policy, proxy, streaming, process, reload, security, and integration coverage, including deterministic malformed-JSON, HTTP-failure, and transport-failure upstream fixtures.
 - Adds Python 3.13/3.14 CI, Ruff, Pyrefly, unit/integration jobs, `pip-audit 2.10.1`, and official MCP conformance `0.2.0-alpha.11` against the Python MCP SDK 2.1.1 Everything server pinned at commit `0921d94a74db900dccd2d534842aa7b6160542d2`.
 
 ## Dependency baseline

@@ -188,11 +188,13 @@ async def test_valid_trace_context_is_forwarded_and_invalid_context_is_dropped()
                     "Mcp-Method": "tools/list",
                     "traceparent": valid_traceparent,
                     "tracestate": "vendor=value",
+                    "baggage": "secret-shaped=caller-controlled",
                 },
             )
         forwarded = {key.casefold(): value for key, value in call.call_args.kwargs["headers"].items()}
         assert forwarded["traceparent"] == valid_traceparent
         assert forwarded["tracestate"] == "vendor=value"
+        assert "baggage" not in forwarded
         assert accepted.status_code == 200
 
         stream = _json_stream(b'{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}')

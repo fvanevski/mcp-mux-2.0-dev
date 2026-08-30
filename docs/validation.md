@@ -16,13 +16,13 @@ Phase 0 introduced this runner and the initial CI ratchet as an **intentional va
 
 - `Quality (Python 3.13)` and `Quality (Python 3.14)`: pinned Ruff plus Pyrefly;
 - `Unit tests (Python 3.13)` and `Unit tests (Python 3.14)`: the non-integration regression corpus;
-- `Integration tests (Python 3.13)` and `Integration tests (Python 3.14)`: compatibility, legacy lifecycle, and observability integration coverage;
+- `Integration tests (Python 3.13)` and `Integration tests (Python 3.14)`: compatibility, deterministic malformed/HTTP/transport upstream-failure fixtures, legacy lifecycle, and observability integration coverage;
 - `Dependency audit`: locked runtime dependencies audited with `pip-audit 2.10.1`;
 - `MCP conformance (2026-07-28)`: official `@modelcontextprotocol/conformance@0.2.0-alpha.11` requirements run through the mux against the Python MCP SDK 2.1.1 Everything server pinned at commit `0921d94a74db900dccd2d534842aa7b6160542d2`. The only expected-failure baseline is `server-stateless:sep-2575-server-unsupported-version-error`, where the mux correctly terminates the unsupported version at its gateway boundary but the referee additionally expects upstream fixture-internal metrics that cannot exist for an intercepted request.
 
 The supported Python MCP SDK line is current stable v2; the v0.2.0 manifest requires `mcp>=2.1.1,<3`, with the release lock resolving `2.1.1`.
 
-All named CI checks are expected to complete successfully on the exact PR head before merge disposition. Repository/branch protection configuration is a GitHub governance control; workflow success alone does not grant merge authorization.
+All named CI checks are expected to complete successfully on the exact PR head before merge disposition. Repository/branch protection configuration is a GitHub governance control; workflow success alone does not grant merge authorization. Issue #9 additionally requires the quality, unit, integration, and dependency-audit checks to be configured as required checks on `main`; that policy must be verified independently from workflow success before Phase 6 can be considered complete.
 
 ## Authority inputs
 

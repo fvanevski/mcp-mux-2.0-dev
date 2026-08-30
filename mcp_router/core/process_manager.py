@@ -346,7 +346,6 @@ class ProcessManager:
                     ):
                         return
                     runtime.restart_attempts += 1
-                    runtime.process_restarts_total += 1
                     attempt = runtime.restart_attempts
                     delay = self._restart_delay(endpoint_cfg, attempt)
 
@@ -370,6 +369,7 @@ class ProcessManager:
                         or attempt > restart.max_attempts
                     ):
                         return
+                    runtime.process_restarts_total += 1
                     try:
                         await self._start_locked(
                             runtime,
