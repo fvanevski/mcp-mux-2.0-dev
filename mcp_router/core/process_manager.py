@@ -177,8 +177,9 @@ class ProcessManager:
         final_state: RuntimeState = RuntimeState.STOPPED,
     ) -> None:
         async with runtime.lock:
-            if runtime.state is not RuntimeState.STOPPED:
-                runtime.state = RuntimeState.DRAINING
+            # Retirement must become non-activatable before the first await,
+            # even when no managed process is currently running.
+            runtime.state = RuntimeState.DRAINING
         await runtime.wait_for_leases()
         await runtime.cancel_legacy_tasks()
         await self.stop_managed_server(runtime, final_state=final_state)

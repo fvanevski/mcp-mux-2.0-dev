@@ -280,6 +280,69 @@ async def test_multi_endpoint_reload_keeps_retired_runtime_unavailable_until_pub
 
 
 @pytest.mark.asyncio
+async def test_stopped_retired_runtime_is_draining_before_first_await() -> None:
+    router = MCPRouter(Starlette(), "unused")
+    old_config = managed_config(url="http://localhost:3033/mcp")
+    replacement = RouterConfig.model_validate(
+        {
+            "endpoints": [
+                {
+                    "path": "managed",
+                    "mode": "managed_cli",
+                    "argv": ["example-mcp", "--serve"],
+                    "url": "http://localhost:4040/mcp",
+                    "summary": "Replacement fixture",
+                }
+            ]
+        }
+    )
+    router._configs = {"managed": old_config}
+    old_runtime = router._runtimes["managed"]
+    assert old_runtime.state is RuntimeState.STOPPED
+
+    drain_waiting = asyncio.Event()
+    allow_drain = asyncio.Event()
+
+    async def blocked_wait_for_leases() -> None:
+        drain_waiting.set()
+        await allow_drain.wait()
+
+    with (
+        patch.object(
+            old_runtime,
+            "wait_for_leases",
+            new_callable=AsyncMock,
+            side_effect=blocked_wait_for_leases,
+        ) as wait_for_leases,
+        patch.object(
+            router.process_manager,
+            "start_managed_server",
+            new_callable=AsyncMock,
+        ) as start_managed,
+    ):
+        reload_task = asyncio.create_task(router.apply_configuration(replacement))
+        await drain_waiting.wait()
+
+        assert router._runtimes["managed"] is old_runtime
+        assert old_runtime.state is RuntimeState.DRAINING
+        assert not reload_task.done()
+
+        lease, rejection = await router._acquire_upstream_lease(old_runtime)
+        assert lease is None
+        assert rejection is not None
+        assert rejection.status_code == 503
+        start_managed.assert_not_awaited()
+
+        allow_drain.set()
+        await reload_task
+
+    wait_for_leases.assert_awaited_once_with()
+    assert old_runtime.state is RuntimeState.DRAINING
+    assert router._runtimes["managed"] is not old_runtime
+    assert router._runtimes["managed"].config.url == "http://localhost:4040/mcp"
+
+
+@pytest.mark.asyncio
 async def test_local_legacy_sse_connection_does_not_start_or_lease_managed_runtime() -> None:
     router = MCPRouter(Starlette(), "unused")
     endpoint = managed_config(legacy_sse_bridge=True)
