@@ -653,6 +653,8 @@ class MCPRouter:
         target_url: str,
         forward_headers: dict[str, str],
         request_body: bytes,
+        policy: CapabilityPolicy,
+        principal: str,
     ) -> Response:
         try:
             client = await self._get_http_client()
@@ -669,8 +671,12 @@ class MCPRouter:
                 timeout=endpoint.upstream_timeout,
             )
         except (ClientDisconnect, httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
-            logger.error("Proxy error for %s: %s", path_prefix, exc)
-            return JSONResponse({"error": f"Proxy error: {exc}"}, status_code=502)
+            logger.error(
+                "Proxy error for %s: %s",
+                path_prefix,
+                self._redactor.redact(str(exc)),
+            )
+            return JSONResponse({"error": "Upstream proxy request failed"}, status_code=502)
 
         content_type = response.headers.get("content-type", "")
         if "application/json" in content_type.casefold():
@@ -683,19 +689,24 @@ class MCPRouter:
                 return JSONResponse({"error": "Upstream response timed out"}, status_code=504)
             finally:
                 await stream_context.__aexit__(None, None, None)
-            body_str = body_bytes.decode("utf-8", errors="replace")
-            filtered_body = filter_tools_response(
-                body_str,
-                endpoint.allowed_tools,
-                endpoint.denied_tools,
+            decoded_body = body_bytes.decode("utf-8", errors="replace")
+            redacted_body = self._redactor.redact(decoded_body)
+            projected_body, policy_changed = policy.project_json_text(
+                redacted_body,
+                principal=principal,
+                endpoint=path_prefix,
             )
+            body_transformed = policy_changed or redacted_body != decoded_body
             response_headers = build_response_headers(
                 response.headers,
                 _HOP_BY_HOP_REQUEST_HEADERS,
                 body_was_decoded=True,
+                body_was_transformed=body_transformed,
             )
+            if body_transformed:
+                response_headers["Cache-Control"] = "private, no-store"
             return Response(
-                content=filtered_body.encode("utf-8"),
+                content=projected_body.encode("utf-8"),
                 status_code=response.status_code,
                 headers=response_headers,
                 media_type=content_type,
@@ -705,6 +716,7 @@ class MCPRouter:
             response_headers = build_response_headers(
                 response.headers,
                 _HOP_BY_HOP_REQUEST_HEADERS,
+                body_was_transformed=True,
             )
             response_headers.update(
                 {
@@ -717,15 +729,18 @@ class MCPRouter:
             async def sse_content_generator() -> AsyncIterator[bytes]:
                 try:
                     async for event in iter_sse_events(response.aiter_lines()):
-                        transformed = transform_sse_event(
-                            event,
-                            lambda data: filter_tools_response(
-                                data,
-                                endpoint.allowed_tools,
-                                endpoint.denied_tools,
-                            ),
-                        )
-                        yield render_sse_event(transformed)
+                        def transform(data: str) -> str:
+                            redacted = self._redactor.redact(data)
+                            current_endpoint = self._configs.get(path_prefix, endpoint)
+                            current_policy = CapabilityPolicy.from_endpoint(current_endpoint)
+                            projected, _ = current_policy.project_json_text(
+                                redacted,
+                                principal=principal,
+                                endpoint=path_prefix,
+                            )
+                            return projected
+
+                        yield render_sse_event(transform_sse_event(event, transform))
                 finally:
                     await stream_context.__aexit__(None, None, None)
 
@@ -736,10 +751,14 @@ class MCPRouter:
                 media_type=content_type,
             )
 
+        textual_response = content_type.casefold().startswith("text/")
         response_headers = build_response_headers(
             response.headers,
             _HOP_BY_HOP_REQUEST_HEADERS,
+            body_was_transformed=textual_response and self._redactor.active,
         )
+        if textual_response and self._redactor.active:
+            response_headers["Cache-Control"] = "private, no-store"
 
         async def content_generator() -> AsyncIterator[bytes]:
             iterator = response.aiter_bytes().__aiter__()
@@ -752,7 +771,11 @@ class MCPRouter:
                         )
                     except StopAsyncIteration:
                         break
-                    yield chunk
+                    if textual_response and self._redactor.active:
+                        text = chunk.decode("utf-8", errors="replace")
+                        yield self._redactor.redact(text).encode("utf-8")
+                    else:
+                        yield chunk
             finally:
                 await stream_context.__aexit__(None, None, None)
 
