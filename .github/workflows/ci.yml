@@ -1,107 +1,134 @@
 name: CI
 
 on:
-  pull_request:
   push:
-    branches:
-      - main
+    branches: [main]
+  pull_request:
 
 permissions:
   contents: read
 
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  CI_TOOLCHAIN: .github/ci/toolchain.txt
-  BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-  TARGET_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-
 jobs:
-  ruff:
-    name: Ruff
+  quality:
+    name: Quality (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+      - uses: astral-sh/setup-uv@v7.1.2
         with:
-          python-version-file: .python-version
-      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
-        with:
-          version: "0.12.7"
-          enable-cache: true
-      - name: Sync locked project environment
-        run: uv sync --frozen
-      - name: Select changed Python files
-        run: |
-          .github/ci/changed-python.sh "$BASE_SHA" "$TARGET_SHA" > "$RUNNER_TEMP/changed-python.txt"
-          cat "$RUNNER_TEMP/changed-python.txt"
-      - name: Ruff lint changed Python
-        run: |
-          mapfile -t files < "$RUNNER_TEMP/changed-python.txt"
-          if ((${#files[@]} == 0)); then
-            echo "No changed Python files."
-            exit 0
-          fi
-          uv run --frozen --with-requirements "$CI_TOOLCHAIN" ruff --version
-          uv run --frozen --with-requirements "$CI_TOOLCHAIN" ruff check "${files[@]}"
+          python-version: ${{ matrix.python-version }}
+      - name: Sync project
+        run: uv sync --frozen --all-groups
+      - name: Install pinned validation tools
+        run: uv pip install --python .venv/bin/python -r .github/ci/toolchain.txt
+      - name: Ruff
+        run: .venv/bin/ruff check .
+      - name: Pyrefly
+        run: .venv/bin/pyrefly check mcp_router tests
 
-  pyrefly:
-    name: Pyrefly
+  unit:
+    name: Unit tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7.1.2
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 0
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version-file: .python-version
-      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
-        with:
-          version: "0.12.7"
-          enable-cache: true
-      - name: Sync locked project environment
-        run: uv sync --frozen
-      - name: Select changed Python files
-        run: |
-          .github/ci/changed-python.sh "$BASE_SHA" "$TARGET_SHA" > "$RUNNER_TEMP/changed-python.txt"
-          cat "$RUNNER_TEMP/changed-python.txt"
-      - name: Pyrefly type check changed Python
-        run: |
-          mapfile -t files < "$RUNNER_TEMP/changed-python.txt"
-          if ((${#files[@]} == 0)); then
-            echo "No changed Python files."
-            exit 0
-          fi
-          uv run --frozen --with-requirements "$CI_TOOLCHAIN" pyrefly --version
-          uv run --frozen --with-requirements "$CI_TOOLCHAIN" pyrefly check "${files[@]}"
+          python-version: ${{ matrix.python-version }}
+      - name: Sync project
+        run: uv sync --frozen --all-groups
+      - name: Run unit/regression suites
+        run: >-
+          uv run pytest -q tests
+          --ignore=tests/test_compatibility_baseline.py
+          --ignore=tests/test_phase5_legacy_sse.py
 
-  pytest:
-    name: Pytest
+  integration:
+    name: Integration tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7.1.2
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 1
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+          python-version: ${{ matrix.python-version }}
+      - name: Sync project
+        run: uv sync --frozen --all-groups
+      - name: Run compatibility and lifecycle integration suites
+        run: >-
+          uv run pytest -q
+          tests/test_compatibility_baseline.py
+          tests/test_phase5_legacy_sse.py
+          tests/test_observability.py
+
+  dependency-audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7.1.2
         with:
-          python-version-file: .python-version
-      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+          python-version: "3.13"
+      - name: Export locked runtime dependencies
+        run: uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file /tmp/runtime-requirements.txt
+      - name: Audit locked runtime dependencies
+        run: uvx --from pip-audit==2.10.1 pip-audit -r /tmp/runtime-requirements.txt
+
+  conformance:
+    name: MCP conformance (2026-07-28)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          version: "0.12.7"
-          enable-cache: true
-      - name: Sync locked project environment
-        run: uv sync --frozen
-      - name: Pytest suite
+          node-version: "22"
+      - uses: astral-sh/setup-uv@v7.1.2
+        with:
+          python-version: "3.13"
+      - name: Sync project
+        run: uv sync --frozen --all-groups
+      - name: Start official Everything server
+        env:
+          PORT: "3001"
         run: |
-          uv run --frozen --with-requirements "$CI_TOOLCHAIN" pytest --version
-          uv run --frozen --with-requirements "$CI_TOOLCHAIN" pytest -q
+          npx --yes @modelcontextprotocol/server-everything@2.0.0 streamableHttp > /tmp/everything.log 2>&1 &
+          echo $! > /tmp/everything.pid
+          timeout 30 bash -c 'until curl -sS -o /dev/null http://127.0.0.1:3001/mcp; do sleep 0.5; done'
+      - name: Start mux proxy
+        env:
+          MCP_MUX_CONFIG: ${{ github.workspace }}/tests/conformance/router.yaml
+        run: |
+          uv run python main.py --host 127.0.0.1 --port 8012 > /tmp/mcp-mux.log 2>&1 &
+          echo $! > /tmp/mcp-mux.pid
+          timeout 30 bash -c 'until curl -fsS http://127.0.0.1:8012/summary >/dev/null; do sleep 0.5; done'
+      - name: Run official MCP conformance suite through mux
+        run: >-
+          npx --yes @modelcontextprotocol/conformance@0.1.16
+          server
+          --url http://127.0.0.1:8012/conformance
+          --suite active
+          --spec-version 2026-07-28
+      - name: Emit service logs on failure
+        if: failure()
+        run: |
+          echo '--- Everything server ---'
+          cat /tmp/everything.log || true
+          echo '--- mcp-mux ---'
+          cat /tmp/mcp-mux.log || true
+      - name: Stop services
+        if: always()
+        run: |
+          test ! -f /tmp/mcp-mux.pid || kill "$(cat /tmp/mcp-mux.pid)" || true
+          test ! -f /tmp/everything.pid || kill "$(cat /tmp/everything.pid)" || true
