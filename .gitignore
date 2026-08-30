@@ -1,148 +1,82 @@
-# Byte-compiled / optimized / DLL files
+# ==========================================
+# Codex CLI Skill - Python Skill .gitignore
+# ==========================================
+
+# --- Environment & Secrets ---
+.env
+.env.*
+*.pem
+*.key
+*.crt
+secrets/
+credentials/
+*.secret
+
+# --- Python & Bytecode ---
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
+*.pyo
+*.pyd
 
-# Distribution / packaging
-bin/
-build/
-dist/
-develop-eggs/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
+# --- Virtual Environments ---
+.venv/
+venv/
+env/
+ENV/
+.venv*/
 
-# PyInstaller
-#  Usually these files are written by a python project, but may vary
-*.manifest
-*.spec
-
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
+# --- Testing, Coverage & Quality Tools ---
+.pytest_cache/
 .coverage
 .coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
-cover/
-
-# Translations
-*.mo
-*.pot
-
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
-
-# Flask stuff:
-instance/
-.webassets-cache
-
-# Scrapy stuff:
-.scrapy
-
-# Sphinx documentation
-docs/_build/
-
-# PyBuilder
-.pybuilder/
-target/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# IPython
-profile_default/
-ipython_config.py
-
-# pyenv
-#   For a library or package, you might want to ignore these files since the code is
-#   intended to run in multiple environments; otherwise, check them in:
-# .python-version
-
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if Pipfile.lock is not desired, it can be added here.
-#Pipfile.lock
-
-# poetry
-#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
-#   Poetry.lock will be checked-in by default.
-#poetry.lock
-
-# pdm
-#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
-#pdm.lock
-
-# PEP 582; used by e.g. github.com/lincolnloop/layman and github.com/pdm-project/pdm
-__pypackages__/
-
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
-
-# SageMath parsed files
-*.sage.py
-
-# Environments
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
-# Spyder project settings
-.spyderproject
-.spyproject
-
-# Rope project settings
-.ropeproject
-
-# mkdocs documentation
-/site
-
-# mypy
+htmlcov/
+.coverage_html/
+.coverage_xml/
+.ruff_cache/
 .mypy_cache/
-.dmypy.json
-dmypy.json
-
-# Pyre type checker
+.pytype/
 .pyre/
 
-# pytype static analyzer
-.pytype/
+# --- Package Build & Distribution ---
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
 
-# Cython debug symbols
-cython_debug/
+# --- Logs & Temporary Files ---
+*.log
+tmp/
+temp/
+.cache/
+.pip/
+.uv/
 
-# OS metadata
+# --- Codex CLI & Skill Caches ---
+.codex_cache/
+.codex_config/
+.skill_cache/
+.skill_config/
+.cached_responses/
+test_output/
+output/
+
+# --- IDE & Editor Settings ---
+.idea/
+.vscode/
+.settings/
+*.swp
+*.swo
+*~
+
+# --- OS Generated Files ---
 .DS_Store
 Thumbs.db
+desktop.ini
+
+# --- Agent Instructions ---
+opencode.json
+AGENTS.md
+QWEN.md
