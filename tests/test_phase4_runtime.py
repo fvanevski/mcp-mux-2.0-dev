@@ -17,7 +17,11 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 
-from mcp_router.core.config_loader import ManagedEndpointConfig, RouterConfig
+from mcp_router.core.config_loader import (
+    ManagedEndpointConfig,
+    ManagedRestartConfig,
+    RouterConfig,
+)
 from mcp_router.core.process_manager import ProcessManager
 from mcp_router.core.runtime import EndpointRuntime, RuntimeState
 from mcp_router.server import BridgeSession, MCPRouter
@@ -1035,6 +1039,73 @@ async def test_failed_runtime_rejects_demand_activation_without_resetting_restar
         restart_task.cancel()
         await asyncio.gather(restart_task, return_exceptions=True)
         runtime.restart_task = None
+
+
+@pytest.mark.parametrize(
+    "replacement_restart",
+    [
+        {"enabled": False, "max_attempts": 3},
+        {"enabled": True, "max_attempts": 1},
+    ],
+    ids=["disabled-during-backoff", "bound-lowered-during-backoff"],
+)
+@pytest.mark.asyncio
+async def test_restart_backoff_revalidates_in_place_policy_before_start(
+    replacement_restart: dict[str, object],
+) -> None:
+    router = MCPRouter(Starlette(), "unused")
+    endpoint = managed_config(
+        restart={
+            "enabled": True,
+            "max_attempts": 3,
+            "initial_backoff": 0.25,
+            "max_backoff": 0.5,
+        }
+    )
+    router._configs = {endpoint.path: endpoint}
+    runtime = router._runtimes[endpoint.path]
+    runtime.state = RuntimeState.FAILED
+    runtime.restart_attempts = 1
+    backoff_started = asyncio.Event()
+    release_backoff = asyncio.Event()
+
+    async def blocked_backoff(delay: float) -> None:
+        assert delay == 0.5
+        backoff_started.set()
+        await release_backoff.wait()
+
+    replacement_endpoint = endpoint.model_copy(
+        update={"restart": ManagedRestartConfig.model_validate(replacement_restart)}
+    )
+    replacement = RouterConfig(endpoints=[replacement_endpoint])
+
+    with (
+        patch(
+            "mcp_router.core.process_manager.asyncio.sleep",
+            side_effect=blocked_backoff,
+        ),
+        patch.object(
+            router.process_manager,
+            "_start_locked",
+            new_callable=AsyncMock,
+        ) as start_locked,
+    ):
+        restart_task = asyncio.create_task(router.process_manager._restart_loop(runtime))
+        runtime.restart_task = restart_task
+        await backoff_started.wait()
+
+        assert runtime.restart_attempts == 2
+        await router.apply_configuration(replacement)
+        assert router._runtimes[endpoint.path] is runtime
+        assert runtime.config is replacement_endpoint
+
+        release_backoff.set()
+        await restart_task
+
+    start_locked.assert_not_awaited()
+    assert runtime.state is RuntimeState.FAILED
+    assert runtime.restart_attempts == 2
+    assert runtime.restart_task is None
 
 
 @pytest.mark.asyncio

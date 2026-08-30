@@ -350,7 +350,15 @@ class ProcessManager:
                 await asyncio.sleep(delay)
 
                 async with runtime.lock:
-                    if runtime.state is not RuntimeState.FAILED:
+                    endpoint_cfg = runtime.config
+                    if not isinstance(endpoint_cfg, ManagedEndpointConfig):
+                        return
+                    restart = endpoint_cfg.restart
+                    if (
+                        runtime.state is not RuntimeState.FAILED
+                        or not restart.enabled
+                        or attempt > restart.max_attempts
+                    ):
                         return
                     try:
                         await self._start_locked(
