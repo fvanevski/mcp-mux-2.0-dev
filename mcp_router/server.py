@@ -462,7 +462,7 @@ class MCPRouter:
         self,
         runtime: EndpointRuntime,
     ) -> tuple[UpstreamLease | None, JSONResponse | None]:
-        if not self._accepting_work:
+        if not self._accepting_work and self._running:
             return None, JSONResponse({"error": "Gateway is shutting down"}, status_code=503)
 
         if runtime.managed:
@@ -1123,23 +1123,19 @@ async def lifespan(app: Starlette):
     del app
     logger.info("Initializing MCP Router Lifespan...")
     await router.open_http_client()
+    router._accepting_work = True
     watcher = ConfigWatcher(CONFIG_PATH, router.apply_configuration)
     try:
         await watcher.start()
-
-        if os.path.exists(CONFIG_PATH):
-            try:
-                initial_config = load_router_config(CONFIG_PATH)
-                router.apply_configuration(initial_config)
-            except (OSError, RuntimeError, ValueError, yaml.YAMLError) as exc:
-                logger.error("Failed to apply initial configuration: %s", exc)
-
         router._running = True
-        router._checker_task = asyncio.create_task(router.idle_timeout_checker())
+        router._checker_task = asyncio.create_task(
+            router.idle_timeout_checker(),
+            name="mcp-mux:idle-timeout-checker",
+        )
         yield
     finally:
         logger.info("Shutting down MCP Router Lifespan...")
-        router._running = False
+        router._accepting_work = False
         if router._checker_task:
             router._checker_task.cancel()
             try:
@@ -1148,8 +1144,9 @@ async def lifespan(app: Starlette):
                 pass
             router._checker_task = None
         await watcher.stop()
-        await router.process_manager.cleanup()
+        await router.process_manager.cleanup(list(router._runtimes.values()))
         await router.close_http_client()
+        router._running = False
 
 
 app = Starlette(lifespan=lifespan)
