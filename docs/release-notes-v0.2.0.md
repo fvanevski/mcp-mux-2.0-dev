@@ -20,7 +20,7 @@
 
 ## Breaking changes
 
-See `docs/migration-v0.1-to-v0.2.md`. The release intentionally rejects malformed/batched modern traffic, enforces the `2026-07-28` metadata/routing contract, removes arbitrary modern subpaths, enforces direct capability authorization and credential isolation, hardens HTTP exposure, replaces process/reload heuristics with explicit runtime lifecycle, bounds/deprecates the local SSE bridge, and rejects unimplemented `stdio_bridge` configuration.
+See `docs/migration-v0.1-to-v0.2.md`. The release intentionally rejects malformed/batched modern traffic, fails closed on malformed upstream JSON, narrows automatic trace propagation to validated `traceparent` plus bounded `tracestate`, enforces the `2026-07-28` metadata/routing contract, removes arbitrary modern subpaths, enforces direct capability authorization and credential isolation, hardens HTTP exposure, replaces process/reload heuristics with explicit runtime lifecycle, bounds/deprecates the local SSE bridge, and rejects unimplemented `stdio_bridge` configuration.
 
 ## Release evidence
 

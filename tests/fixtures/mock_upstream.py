@@ -33,7 +33,7 @@ class RecordedRequest:
 
 @dataclass
 class MockMCPUpstream:
-    """Deterministic in-process MCP upstream used by Phase 0 compatibility tests."""
+    """Deterministic in-process MCP upstream for compatibility and failure-path tests."""
 
     mode: MockMode
     requests: list[RecordedRequest] = field(default_factory=list)

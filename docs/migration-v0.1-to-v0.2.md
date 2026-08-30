@@ -18,7 +18,9 @@ The supported Python MCP SDK line is current stable v2. The v0.2.0 manifest requ
 8. **HTTP exposure is hardened.** Host, Origin, loopback/authenticated binding, trusted-proxy identity, and CORS behavior are validated.
 9. **Managed runtime lifecycle is explicit.** Startup, running, draining, failure, leases, restart policy, inactivity, reload, and cleanup are represented by endpoint runtime state rather than loose process heuristics.
 10. **The local legacy SSE bridge is bounded and deprecated.** It is disabled unless explicitly configured, and its queue, TTL, session count, backpressure, cancellation, retirement, and failure behavior are bounded/observable.
-11. **`stdio_bridge` is rejected.** Only implemented endpoint modes are accepted; no incomplete stdio compatibility mode is advertised.
+11. **Malformed upstream JSON fails closed.** An upstream response labeled `application/json` that cannot be parsed as JSON is no longer forwarded as a successful malformed MCP payload; the gateway returns its own HTTP 502 error and records the upstream failure.
+12. **Automatic trace propagation is deliberately narrow.** Valid W3C version-00 `traceparent` plus bounded `tracestate` are forwarded by default; arbitrary caller `baggage` is not. Operators that intentionally need another non-security header must opt it in through endpoint `inbound_headers` after reviewing its trust implications.
+13. **`stdio_bridge` is rejected.** Only implemented endpoint modes are accepted; no incomplete stdio compatibility mode is advertised.
 
 ## Configuration review
 
@@ -29,7 +31,7 @@ Validate every endpoint against `docs/configuration.md`. In particular, migrate 
 - `/summary` now includes runtime and gateway counters.
 - `/metrics` exposes endpoint state, active leases, process restart attempts, stream cancellations, denied calls, upstream errors, and bounded legacy-bridge counters.
 - Requests emit payload-free structured operational logs and return `X-Request-Id`.
-- Valid supported W3C trace context is forwarded upstream without logging raw trace values.
+- Valid supported W3C version-00 `traceparent` and bounded `tracestate` are forwarded upstream without logging raw trace values; caller `baggage` is deny-by-default.
 
 ## Validation changes
 
