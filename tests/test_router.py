@@ -16,7 +16,7 @@ from mcp_router.core.config_loader import (
 )
 from mcp_router.core.process_manager import ProcessManager
 from mcp_router.core.runtime import EndpointRuntime, RuntimeState
-from mcp_router.server import BridgeSession, app, filter_tools_response, router
+from mcp_router.server import app, filter_tools_response, router
 
 # --- Config Loader Tests ---
 
@@ -347,7 +347,7 @@ async def test_streamable_http_plain_get_returns_json_not_upstream_html():
             transport="streamable-http"
         )
     }
-    router.active_sessions.clear()
+    router._legacy_bridge = None
 
     mock_req = MagicMock(spec=Request)
     mock_req.method = "GET"
@@ -362,7 +362,7 @@ async def test_streamable_http_plain_get_returns_json_not_upstream_html():
     assert response.status_code == 405
     assert response.media_type == "application/json"
     assert b"Streamable HTTP" in response.body
-    assert router.active_sessions == {}
+    assert router._legacy_bridge is None
     mock_stream.assert_not_called()
 
 
@@ -379,7 +379,7 @@ async def test_streamable_http_sse_get_preserves_upstream_streamable_http():
             transport="streamable-http"
         )
     }
-    router.active_sessions.clear()
+    router._legacy_bridge = None
 
     mock_req = MagicMock(spec=Request)
     mock_req.method = "GET"
@@ -404,7 +404,7 @@ async def test_streamable_http_sse_get_preserves_upstream_streamable_http():
 
     assert response.status_code == 405
     assert response.media_type == "application/json"
-    assert router.active_sessions == {}
+    assert router._legacy_bridge is None
     mock_stream_call.assert_called_once()
     assert mock_stream_call.call_args[1]["method"] == "GET"
     assert mock_stream_call.call_args[1]["url"] == "https://huggingface.co/mcp"
@@ -421,10 +421,10 @@ async def test_streamable_http_sse_get_opens_local_sse_bridge_when_enabled():
             url="https://huggingface.co/mcp",
             summary="HuggingFace remote server",
             transport="streamable-http",
-            legacy_sse_bridge=True
+            legacy_sse_bridge={}
         )
     }
-    router.active_sessions.clear()
+    router._legacy_bridge = None
 
     mock_req = MagicMock(spec=Request)
     mock_req.method = "GET"
@@ -438,10 +438,12 @@ async def test_streamable_http_sse_get_opens_local_sse_bridge_when_enabled():
 
     assert response.status_code == 200
     assert response.media_type == "text/event-stream"
-    assert len(router.active_sessions) == 1
-    session = next(iter(router.active_sessions.values()))
+    assert router._legacy_bridge is not None
+    assert len(router._legacy_bridge.sessions) == 1
+    session = next(iter(router._legacy_bridge.sessions.values()))
     assert session.path_prefix == "huggingface"
     mock_stream.assert_not_called()
+    await response.body_iterator.aclose()
 
 
 @pytest.mark.asyncio
