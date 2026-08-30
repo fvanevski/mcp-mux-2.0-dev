@@ -566,6 +566,9 @@ async def test_proxy_headers_forwarding():
                 json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
                 headers={
                     "Authorization": "Bearer caller-secret",
+                    "Cookie": "caller_session=caller-secret",
+                    "Proxy-Authorization": "Bearer proxy-caller-secret",
+                    "X-Forwarded-User": "spoofed-caller",
                     "X-Override": "client-value",
                     "X-Client-Header": "only-client",
                     "X-Unlisted": "must-not-forward",
@@ -584,6 +587,9 @@ async def test_proxy_headers_forwarding():
             # Explicitly allowlisted client headers are preserved, but caller credentials and unlisted headers are not.
             assert called_headers.get("x-client-header") == "only-client" or called_headers.get("X-Client-Header") == "only-client"
             assert called_headers.get("authorization") == "Bearer upstream-secret" or called_headers.get("Authorization") == "Bearer upstream-secret"
+            assert called_headers.get("cookie") is None and called_headers.get("Cookie") is None
+            assert called_headers.get("proxy-authorization") is None and called_headers.get("Proxy-Authorization") is None
+            assert called_headers.get("x-forwarded-user") is None and called_headers.get("X-Forwarded-User") is None
             assert called_headers.get("x-unlisted") is None and called_headers.get("X-Unlisted") is None
 
 

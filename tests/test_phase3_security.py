@@ -155,7 +155,10 @@ async def test_authenticated_gateway_consumes_caller_key_and_injects_upstream_ke
                     "mode": "remote",
                     "url": "https://upstream.test/mcp",
                     "summary": "Example",
-                    "headers": {"Authorization": "Bearer upstream-secret"},
+                    "headers": {
+                        "Authorization": "Bearer upstream-secret",
+                        "X-Custom-Auth": "custom-secret",
+                    },
                 }
             ],
         }
@@ -163,11 +166,12 @@ async def test_authenticated_gateway_consumes_caller_key_and_injects_upstream_ke
     isolated.apply_configuration(config)
 
     _, stream_context = json_upstream_response(
-        b'{"jsonrpc":"2.0","id":1,"result":{"echo":"Bearer upstream-secret"}}',
+        b'{"jsonrpc":"2.0","id":1,"result":{"echo":"Bearer upstream-secret custom-secret"}}',
         headers={
             "etag": '"stale"',
             "digest": "sha-256=stale",
             "content-length": "999",
+            "set-cookie": "upstream_session=opaque-upstream-cookie; HttpOnly",
         },
     )
     isolated._http_client, fake_client = fake_client_for(stream_context)
@@ -188,13 +192,16 @@ async def test_authenticated_gateway_consumes_caller_key_and_injects_upstream_ke
 
     assert accepted.status_code == 200
     assert "upstream-secret" not in accepted.text
+    assert "custom-secret" not in accepted.text
     assert "[REDACTED]" in accepted.text
     assert accepted.headers.get("etag") is None
     assert accepted.headers.get("digest") is None
+    assert accepted.headers.get("set-cookie") is None
     assert accepted.headers["cache-control"] == "private, no-store"
 
     upstream_headers = fake_client.stream.call_args.kwargs["headers"]
     assert upstream_headers["Authorization"] == "Bearer upstream-secret"
+    assert upstream_headers["X-Custom-Auth"] == "custom-secret"
     assert "gateway-secret" not in repr(upstream_headers)
 
 

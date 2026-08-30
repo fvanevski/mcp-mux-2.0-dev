@@ -52,6 +52,7 @@ _DEFAULT_UPSTREAM_REQUEST_HEADERS = {
 _SENSITIVE_RESPONSE_HEADERS = {
     "authorization",
     "proxy-authorization",
+    "set-cookie",
 }
 
 

@@ -6,7 +6,10 @@ from collections.abc import Iterable
 from mcp_router.core.config_loader import RouterConfig
 
 _REDACTED = "[REDACTED]"
-_SECRET_NAME = re.compile(r"(?:authorization|cookie|token|secret|password|api[-_]?key)", re.IGNORECASE)
+_SECRET_NAME = re.compile(
+    r"(?:authorization|credential|cookie|token|secret|password|api[-_]?key|(?:^|[-_.])auth(?:$|[-_.]))",
+    re.IGNORECASE,
+)
 _SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b([A-Za-z0-9_.-]*(?:authorization|cookie|token|secret|password|api[-_]?key)[A-Za-z0-9_.-]*)"
     r"(\s*[:=]\s*)([^\r\n]+)"

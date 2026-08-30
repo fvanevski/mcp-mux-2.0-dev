@@ -70,7 +70,7 @@ headers:
 
 `Authorization`, `Cookie`, `Proxy-Authorization`, Host/hop-by-hop headers, and forwarded-identity headers cannot be added to `inbound_headers`. The caller's credentials are stripped before upstream dispatch; configured `headers` are applied afterward as the upstream credential/header source. The configured trusted-proxy identity header is also removed before forwarding.
 
-Normal logs redact configured API keys, credential-bearing upstream header values, and secret-like managed-process environment values. Upstream text/JSON/SSE responses are redacted against the same known secret set before being returned. Policy- or redaction-transformed responses drop stale representation/cache validators such as `Content-Length`, `Content-Encoding`, `ETag`, and digest metadata and are marked non-cacheable where applicable. The mux currently implements no cross-request discovery cache; any future cache must partition by endpoint, principal/authorization scope, policy identity, and protocol revision.
+Normal logs redact configured API keys, credential-bearing upstream header values, and secret-like managed-process environment values. Upstream text/JSON/SSE responses are redacted against the same known secret set before being returned, and upstream `Set-Cookie` is not exposed to gateway callers. Policy- or redaction-transformed responses drop stale representation/cache validators such as `Content-Length`, `Content-Encoding`, `ETag`, and digest metadata and are marked non-cacheable where applicable. The mux currently implements no cross-request discovery cache; any future cache must partition by endpoint, principal/authorization scope, policy identity, and protocol revision.
 
 ### Endpoint and tool limits
 
