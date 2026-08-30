@@ -19,9 +19,11 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
       - uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41
         with:
+          version: "0.12.7"
           python-version: ${{ matrix.python-version }}
       - name: Sync project
         run: uv sync --frozen --all-groups
@@ -41,8 +43,11 @@ jobs:
         python-version: ["3.13", "3.14"]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       - uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41
         with:
+          version: "0.12.7"
           python-version: ${{ matrix.python-version }}
       - name: Sync project
         run: uv sync --frozen --all-groups
@@ -61,8 +66,11 @@ jobs:
         python-version: ["3.13", "3.14"]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       - uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41
         with:
+          version: "0.12.7"
           python-version: ${{ matrix.python-version }}
       - name: Sync project
         run: uv sync --frozen --all-groups
@@ -78,8 +86,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       - uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41
         with:
+          version: "0.12.7"
           python-version: "3.13"
       - name: Export locked runtime dependencies
         run: uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file /tmp/runtime-requirements.txt
@@ -91,6 +102,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       - name: Checkout official Python MCP SDK 2.1.1 fixture
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -103,6 +116,7 @@ jobs:
           node-version: "24"
       - uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41
         with:
+          version: "0.12.7"
           python-version: "3.13"
       - name: Sync project
         run: uv sync --frozen --all-groups
