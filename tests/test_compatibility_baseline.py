@@ -94,7 +94,7 @@ def _modern_request(
     ],
 )
 def test_configured_upstreams_are_frozen_as_streamable_http(path: str, mode: str, url: str):
-    config_path = Path(__file__).parents[1] / "mcp_router" / "config.yaml"
+    config_path = Path(__file__).parent / "fixtures" / "compatibility-baseline-config.yaml"
     config = load_router_config(str(config_path))
     endpoint = next(item for item in config.endpoints if item.path == path)
 

@@ -43,7 +43,7 @@ Current accepted endpoint modes are:
 
 Transport is explicitly configured or inferred as `streamable-http` when the URL ends in `/mcp` or contains `/mcp/`; otherwise it defaults to `sse`.
 
-The current active `mcp_router/config.yaml` contains four endpoints whose URLs resolve to `streamable-http`: `web-search`, `firecrawl`, `huggingface`, and `context7`. `firecrawl` is the only active `managed_cli` endpoint. The commented Crawl4AI example is not an active compatibility commitment.
+The tracked frozen baseline `tests/fixtures/compatibility-baseline-config.yaml` — recorded in place of the now-untracked operator-local `mcp_router/config.yaml` — contains four endpoints whose URLs resolve to `streamable-http`: `web-search`, `firecrawl`, `huggingface`, and `context7`. `firecrawl` is the only active `managed_cli` endpoint. The commented Crawl4AI example is not an active compatibility commitment.
 
 ### Current Streamable HTTP path
 
@@ -68,7 +68,7 @@ There are two distinct legacy paths.
 
 Bridge sessions are keyed globally but carry `path_prefix`. Cross-endpoint reuse is rejected with `409`, and `apply_configuration()` drops sessions when an endpoint is removed or its configuration changes.
 
-No active endpoint in `mcp_router/config.yaml` sets `legacy_sse_bridge: true`. The operator-verified concrete-client inventory recorded on Issue #3 also identifies no client that requires the bridge. Phase 0 therefore records it as **provisionally unused by real clients**, pending deployment telemetry or new authoritative client evidence.
+No active endpoint in the tracked frozen baseline `tests/fixtures/compatibility-baseline-config.yaml` sets `legacy_sse_bridge: true`. The operator-verified concrete-client inventory recorded on Issue #3 also identifies no client that requires the bridge. Phase 0 therefore records it as **provisionally unused by real clients**, pending deployment telemetry or new authoritative client evidence.
 
 ### Current legacy HTTP+SSE path
 
@@ -220,7 +220,7 @@ Repository authority:
 - `mcp_router/server.py` — current routing, transport, bridge, session, and filtering behavior.
 - `mcp_router/core/config_loader.py` — current endpoint schema and transport inference.
 - `mcp_router/core/process_manager.py` — current managed-process lifecycle.
-- `mcp_router/config.yaml` — current active upstream inventory.
+- `tests/fixtures/compatibility-baseline-config.yaml` — tracked frozen active upstream inventory (operator-local `mcp_router/config.yaml` is untracked).
 - `tests/test_router.py` — current behavioral regressions.
 
 External protocol authority:

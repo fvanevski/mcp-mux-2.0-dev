@@ -135,7 +135,7 @@ def test_endpoint_policy_and_transport_fields_are_validated(field: str, value: o
 
 
 def test_repository_config_migrates_and_validates():
-    config_path = Path(__file__).parents[1] / "mcp_router" / "config.yaml"
+    config_path = Path(__file__).parent / "fixtures" / "compatibility-baseline-config.yaml"
     config = load_router_config(str(config_path))
 
     assert {endpoint.mode for endpoint in config.endpoints} == {"remote", "managed_cli"}

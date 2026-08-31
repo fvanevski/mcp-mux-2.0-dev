@@ -2,6 +2,9 @@
 # Codex CLI Skill - Python Skill .gitignore
 # ==========================================
 
+# --- Local Configuration ---
+mcp_router/config.yaml
+
 # --- Environment & Secrets ---
 .env
 .env.*

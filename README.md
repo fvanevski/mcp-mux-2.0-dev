@@ -62,7 +62,7 @@ Define your endpoints in `mcp_router/config.yaml`. Here is an example layout:
 endpoints:
   - path: "web-search"
     mode: "remote"
-    url: "https://mcp.garion.us/mcp"
+    url: "https://search.example.com/mcp"
     summary: "Google Search and content extraction tool"
     # transport: "streamable-http"  (Automatically detected due to /mcp path suffix)
     allowed_tools:
@@ -71,12 +71,12 @@ endpoints:
 
   - path: "firecrawl"
     mode: "managed_cli"
-    unsafe_shell_command: "export NVM_DIR=$HOME/.config/nvm && [ -s $NVM_DIR/nvm.sh ] && . $NVM_DIR/nvm.sh && npx --yes firecrawl-mcp"
+    unsafe_shell_command: "npx --yes firecrawl-mcp"
     env:
       HTTP_STREAMABLE_SERVER: "true"
       PORT: "3033"
       HOST: "localhost"
-      FIRECRAWL_API_URL: "http://garion.us:3002"
+      FIRECRAWL_API_URL: "http://api.example.com:3002"
     readiness:
       host: "localhost"
       port: 3033
