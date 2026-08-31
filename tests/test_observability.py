@@ -113,6 +113,90 @@ async def test_task_cancellation_records_cancelled_outcome_without_stream_discon
 
 
 @pytest.mark.asyncio
+async def test_disconnect_before_response_start_does_not_count_as_stream_cancellation(caplog):
+    metrics = GatewayMetrics()
+
+    async def app_after_disconnect(
+        scope: ASGIMessage,
+        receive: ASGIReceive,
+        send: ASGISend,
+    ) -> None:
+        scope["mcp.endpoint"] = "weather"
+        assert (await receive())["type"] == "http.disconnect"
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    async def receive() -> ASGIMessage:
+        return {"type": "http.disconnect"}
+
+    sent: list[ASGIMessage] = []
+
+    async def send(message: ASGIMessage) -> None:
+        sent.append(message)
+
+    middleware = GatewayObservabilityMiddleware(app_after_disconnect, metrics=metrics)
+    scope: ASGIMessage = {
+        "type": "http",
+        "method": "GET",
+        "path": "/weather",
+        "headers": [],
+    }
+    caplog.set_level(logging.INFO, logger="mcp_router.requests")
+
+    await middleware(scope, receive, send)
+
+    assert metrics.snapshot("weather")["stream_cancellations_total"] == 0
+    records = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == "mcp_router.requests"
+    ]
+    assert records[-1]["cancelled"] is True
+
+
+@pytest.mark.asyncio
+async def test_disconnect_after_response_completion_does_not_count_as_stream_cancellation(caplog):
+    metrics = GatewayMetrics()
+
+    async def completed_app(
+        scope: ASGIMessage,
+        receive: ASGIReceive,
+        send: ASGISend,
+    ) -> None:
+        scope["mcp.endpoint"] = "weather"
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+        assert (await receive())["type"] == "http.disconnect"
+
+    async def receive() -> ASGIMessage:
+        return {"type": "http.disconnect"}
+
+    sent: list[ASGIMessage] = []
+
+    async def send(message: ASGIMessage) -> None:
+        sent.append(message)
+
+    middleware = GatewayObservabilityMiddleware(completed_app, metrics=metrics)
+    scope: ASGIMessage = {
+        "type": "http",
+        "method": "GET",
+        "path": "/weather",
+        "headers": [],
+    }
+    caplog.set_level(logging.INFO, logger="mcp_router.requests")
+
+    await middleware(scope, receive, send)
+
+    assert metrics.snapshot("weather")["stream_cancellations_total"] == 0
+    records = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == "mcp_router.requests"
+    ]
+    assert records[-1]["cancelled"] is False
+
+
+@pytest.mark.asyncio
 async def test_asgi23_stream_disconnect_message_is_counted_and_logged_once(caplog):
     metrics = GatewayMetrics()
     stream_started = asyncio.Event()

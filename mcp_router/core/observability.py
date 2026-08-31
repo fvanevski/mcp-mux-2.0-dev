@@ -85,13 +85,16 @@ class GatewayObservabilityMiddleware:
         status_code = 500
         bytes_streamed = 0
         response_started = False
+        response_complete = False
         cancelled = False
         downstream_disconnected = False
 
         def mark_downstream_disconnect() -> None:
             nonlocal cancelled, downstream_disconnected, status_code
+            if response_complete:
+                return
             cancelled = True
-            downstream_disconnected = True
+            downstream_disconnected = response_started
             status_code = 499
 
         async def observed_receive() -> ASGIMessage:
@@ -101,7 +104,7 @@ class GatewayObservabilityMiddleware:
             return message
 
         async def observed_send(message: ASGIMessage) -> None:
-            nonlocal status_code, bytes_streamed, response_started
+            nonlocal status_code, bytes_streamed, response_started, response_complete
             message_type = message.get("type")
             body_size = 0
             if message_type == "http.response.start":
@@ -124,6 +127,8 @@ class GatewayObservabilityMiddleware:
                     response_started = True
                 elif message_type == "http.response.body":
                     bytes_streamed += body_size
+                    if not message.get("more_body", False):
+                        response_complete = True
 
         try:
             await self.app(scope, observed_receive, observed_send)
@@ -135,7 +140,7 @@ class GatewayObservabilityMiddleware:
             status_code = 499
             raise
         finally:
-            if downstream_disconnected and response_started:
+            if downstream_disconnected:
                 endpoint = scope.get("mcp.endpoint")
                 if isinstance(endpoint, str) and endpoint:
                     self.metrics.record_stream_cancellation(endpoint)
