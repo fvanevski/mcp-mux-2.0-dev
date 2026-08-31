@@ -723,10 +723,10 @@ class MCPRouter:
                 return JSONResponse({"error": "Upstream response timed out"}, status_code=504)
             finally:
                 await stream_context.__aexit__(None, None, None)
-            decoded_body = body_bytes.decode("utf-8", errors="replace")
             try:
+                decoded_body = body_bytes.decode("utf-8")
                 json.loads(decoded_body)
-            except json.JSONDecodeError:
+            except (UnicodeDecodeError, json.JSONDecodeError):
                 if response.status_code < 500:
                     self._metrics.record_upstream_error(path_prefix)
                 return JSONResponse(

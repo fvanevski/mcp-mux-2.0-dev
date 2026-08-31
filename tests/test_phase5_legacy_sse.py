@@ -561,6 +561,148 @@ async def test_response_task_cancelled_before_first_step_releases_leases_and_all
 
 
 @pytest.mark.asyncio
+async def test_invalid_utf8_json_upstream_fails_closed_in_legacy_bridge() -> None:
+    router = MCPRouter(Starlette(), "unused")
+    endpoint = _endpoint(path="legacy", bridge={"max_sessions": 2})
+    router._configs = {"legacy": endpoint}
+    bridge, session, iterator = await _open_bridge(router, "legacy")
+
+    upstream_response = MagicMock()
+    upstream_response.status_code = 200
+    upstream_response.headers = httpx.Headers({"content-type": "application/json"})
+    upstream_response.aread = AsyncMock(
+        return_value=b'{"jsonrpc":"2.0","id":1,"result":{"text":"\xff"}}'
+    )
+    stream_context = MagicMock()
+    stream_context.__aenter__ = AsyncMock(return_value=upstream_response)
+    stream_context.__aexit__ = AsyncMock(return_value=None)
+    client = MagicMock()
+    client.stream = MagicMock(return_value=stream_context)
+
+    with patch.object(
+        router,
+        "_get_http_client",
+        new_callable=AsyncMock,
+        return_value=client,
+    ):
+        bridge._client_provider = router._get_http_client
+        response = await router.catch_all_proxy(
+            _request(
+                "POST",
+                "legacy",
+                headers={"content-type": "application/json"},
+                query_string=f"session_id={session.session_id}".encode(),
+                body=_legacy_body(),
+            )
+        )
+        assert response.status_code == 202
+        terminal = await asyncio.wait_for(anext(iterator), timeout=0.2)
+
+    assert b"event: error" in terminal
+    assert b"upstream_response_failed" in terminal
+    with pytest.raises(StopAsyncIteration):
+        await anext(iterator)
+    assert session.session_id not in bridge.sessions
+    assert session.runtime.active_leases == 0
+    assert bridge.metrics_snapshot("legacy")["upstream_failures_total"] == 1
+    stream_context.__aexit__.assert_awaited_once_with(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_repeated_bridge_disconnect_and_hot_reload_leave_no_owned_work() -> None:
+    router = MCPRouter(Starlette(), "unused")
+    endpoint = _endpoint(path="legacy", bridge={"max_sessions": 4})
+    router._configs = {"legacy": endpoint}
+    bridge = router._get_legacy_bridge()
+
+    async def open_active_stream():
+        current_bridge, session, iterator = await _open_bridge(router, "legacy")
+        upstream_streaming = asyncio.Event()
+        never = asyncio.Event()
+
+        async def upstream_lines():
+            upstream_streaming.set()
+            yield "event: message"
+            yield 'data: {"jsonrpc":"2.0","id":1,"result":{"tools":[]}}'
+            yield ""
+            await never.wait()
+
+        upstream_response = MagicMock()
+        upstream_response.status_code = 200
+        upstream_response.headers = httpx.Headers({"content-type": "text/event-stream"})
+        upstream_response.aiter_lines = upstream_lines
+        stream_context = MagicMock()
+        stream_context.__aenter__ = AsyncMock(return_value=upstream_response)
+        stream_context.__aexit__ = AsyncMock(return_value=None)
+        client = MagicMock()
+        client.stream = MagicMock(return_value=stream_context)
+        current_bridge._client_provider = AsyncMock(return_value=client)
+
+        post = await router.catch_all_proxy(
+            _request(
+                "POST",
+                "legacy",
+                headers={"content-type": "application/json"},
+                query_string=f"session_id={session.session_id}".encode(),
+                body=_legacy_body(),
+            )
+        )
+        assert post.status_code == 202
+        await asyncio.wait_for(upstream_streaming.wait(), timeout=0.2)
+        assert session.runtime.active_leases == 1
+        assert session.upstreams
+        return session, iterator, stream_context
+
+    async def assert_clean(session: BridgeSession, stream_context: MagicMock) -> None:
+        await asyncio.sleep(0)
+        assert session.closed.is_set()
+        assert session.session_id not in bridge.sessions
+        assert session.setup_tasks == set()
+        assert session.response_tasks == set()
+        assert session.upstreams == set()
+        assert session.queue.empty()
+        assert session.runtime.active_leases == 0
+        assert session.runtime.legacy_session_ids == set()
+        assert session.runtime.legacy_tasks == set()
+        assert not bridge._owned_sessions
+        stream_context.__aexit__.assert_awaited_once_with(None, None, None)
+
+    cycles = 3
+    for cycle in range(cycles):
+        disconnected_session, disconnected_iterator, disconnected_upstream = await open_active_stream()
+        await disconnected_iterator.aclose()
+        await assert_clean(disconnected_session, disconnected_upstream)
+
+        reloaded_session, reloaded_iterator, reloaded_upstream = await open_active_stream()
+        old_runtime = reloaded_session.runtime
+        replacement = RouterConfig.model_validate(
+            {
+                "endpoints": [
+                    {
+                        "path": "legacy",
+                        "mode": "remote",
+                        "url": f"https://legacy-{cycle}.example.test/mcp",
+                        "summary": f"Legacy reload fixture {cycle}",
+                        "transport": "streamable-http",
+                        "legacy_sse_bridge": {"max_sessions": 4},
+                    }
+                ]
+            }
+        )
+        await asyncio.wait_for(router.apply_configuration(replacement), timeout=0.5)
+        await assert_clean(reloaded_session, reloaded_upstream)
+        assert old_runtime.state is RuntimeState.DRAINING
+        assert router._runtimes["legacy"] is not old_runtime
+        await reloaded_iterator.aclose()
+
+    metrics = bridge.metrics_snapshot("legacy")
+    assert metrics["sessions_opened_total"] == cycles * 2
+    assert metrics["posts_total"] == cycles * 2
+    assert metrics["downstream_disconnects_total"] == cycles
+    assert metrics["active_sessions"] == 0
+
+
+@pytest.mark.asyncio
 async def test_bridge_ttl_expires_session_and_rejects_replay() -> None:
     router = MCPRouter(Starlette(), "unused")
     endpoint = _endpoint(

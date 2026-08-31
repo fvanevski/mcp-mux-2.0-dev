@@ -314,10 +314,11 @@ async def test_modern_fixture_does_not_use_legacy_session_header_for_protocol_st
     ("mode", "expected_status", "expected_error"),
     [
         ("malformed-json", 502, "Upstream returned malformed JSON"),
+        ("invalid-utf8-json", 502, "Upstream returned malformed JSON"),
         ("http-failure", 503, "deterministic upstream failure"),
         ("transport-failure", 502, "Upstream proxy request failed"),
     ],
-    ids=["malformed-json", "http-503", "transport-failure"],
+    ids=["malformed-json", "invalid-utf8-json", "http-503", "transport-failure"],
 )
 async def test_negative_upstream_fixtures_fail_closed_and_are_observable(
     mode: MockMode,
