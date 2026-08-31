@@ -375,9 +375,9 @@ class LegacySSEBridge:
                         response.aread(),
                         timeout=endpoint.upstream_timeout,
                     )
-                    body_str = self._response_redactor(
-                        body_bytes.decode("utf-8")
-                    )
+                    body_str = body_bytes.decode("utf-8")
+                    json.loads(body_str)
+                    body_str = self._response_redactor(body_str)
                     projected_body, _ = policy.project_json_text(
                         body_str,
                         principal=principal,

@@ -561,8 +561,18 @@ async def test_response_task_cancelled_before_first_step_releases_leases_and_all
     await iterator.aclose()
 
 
+@pytest.mark.parametrize(
+    "body_bytes",
+    [
+        b'{"jsonrpc":"2.0","id":1,"result":{"text":"\xff"}}',
+        b'{"jsonrpc":"2.0","id":1,"result":',
+    ],
+    ids=["invalid-utf8", "malformed-json"],
+)
 @pytest.mark.asyncio
-async def test_invalid_utf8_json_upstream_fails_closed_in_legacy_bridge() -> None:
+async def test_invalid_json_text_upstream_fails_closed_in_legacy_bridge(
+    body_bytes: bytes,
+) -> None:
     router = MCPRouter(Starlette(), "unused")
     endpoint = _endpoint(path="legacy", bridge={"max_sessions": 2})
     router._configs = {"legacy": endpoint}
@@ -571,9 +581,7 @@ async def test_invalid_utf8_json_upstream_fails_closed_in_legacy_bridge() -> Non
     upstream_response = MagicMock()
     upstream_response.status_code = 200
     upstream_response.headers = httpx.Headers({"content-type": "application/json"})
-    upstream_response.aread = AsyncMock(
-        return_value=b'{"jsonrpc":"2.0","id":1,"result":{"text":"\xff"}}'
-    )
+    upstream_response.aread = AsyncMock(return_value=body_bytes)
     stream_context = MagicMock()
     stream_context.__aenter__ = AsyncMock(return_value=upstream_response)
     stream_context.__aexit__ = AsyncMock(return_value=None)
