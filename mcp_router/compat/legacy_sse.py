@@ -14,6 +14,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from mcp_router.core.config_loader import Endpoint, LegacySSEBridgeConfig
 from mcp_router.core.policy import CapabilityPolicy
+from mcp_router.core.protocol import parse_strict_json_text
 from mcp_router.core.runtime import EndpointRuntime, RuntimeState
 from mcp_router.core.sse import iter_sse_events, render_sse_event, transform_sse_event
 
@@ -376,7 +377,7 @@ class LegacySSEBridge:
                         timeout=endpoint.upstream_timeout,
                     )
                     body_str = body_bytes.decode("utf-8")
-                    json.loads(body_str)
+                    parse_strict_json_text(body_str)
                     body_str = self._response_redactor(body_str)
                     projected_body, _ = policy.project_json_text(
                         body_str,

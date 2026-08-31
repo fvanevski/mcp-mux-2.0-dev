@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import time
@@ -37,6 +36,7 @@ from mcp_router.core.protocol import (
     build_jsonrpc_error,
     extract_policy_request_names,
     parse_jsonrpc_request,
+    parse_strict_json_text,
     validate_protocol_request,
 )
 from mcp_router.core.redaction import SecretRedactor
@@ -655,6 +655,8 @@ class MCPRouter:
         response: httpx.Response | None = None
         try:
             response = await asyncio.wait_for(stream_context.__aenter__(), timeout=timeout)
+            if response.status_code >= 500:
+                self._metrics.record_upstream_error(path_prefix)
             async for event in iter_sse_events(response.aiter_lines()):
                 def transform(data: str) -> str:
                     rewritten = _rewrite_legacy_endpoint_data(data, path_prefix)
@@ -670,6 +672,15 @@ class MCPRouter:
                     return projected
 
                 yield render_sse_event(transform_sse_event(event, transform))
+        except (TimeoutError, httpx.HTTPError, OSError, RuntimeError) as exc:
+            if response is None or response.status_code < 500:
+                self._metrics.record_upstream_error(path_prefix)
+            logger.error(
+                "Upstream SSE response failed for %s: %s",
+                path_prefix,
+                self._redactor.redact(str(exc)),
+            )
+            raise
         finally:
             if response is not None:
                 await stream_context.__aexit__(None, None, None)
@@ -719,14 +730,24 @@ class MCPRouter:
                     timeout=endpoint.upstream_timeout,
                 )
             except TimeoutError:
-                self._metrics.record_upstream_error(path_prefix)
+                if response.status_code < 500:
+                    self._metrics.record_upstream_error(path_prefix)
                 return JSONResponse({"error": "Upstream response timed out"}, status_code=504)
+            except (httpx.HTTPError, OSError, RuntimeError) as exc:
+                if response.status_code < 500:
+                    self._metrics.record_upstream_error(path_prefix)
+                logger.error(
+                    "Upstream response read failed for %s: %s",
+                    path_prefix,
+                    self._redactor.redact(str(exc)),
+                )
+                return JSONResponse({"error": "Upstream response read failed"}, status_code=502)
             finally:
                 await stream_context.__aexit__(None, None, None)
             try:
                 decoded_body = body_bytes.decode("utf-8")
-                json.loads(decoded_body)
-            except (UnicodeDecodeError, json.JSONDecodeError):
+                parse_strict_json_text(decoded_body)
+            except (UnicodeDecodeError, ValueError):
                 if response.status_code < 500:
                     self._metrics.record_upstream_error(path_prefix)
                 return JSONResponse(
@@ -782,6 +803,15 @@ class MCPRouter:
                             return projected
 
                         yield render_sse_event(transform_sse_event(event, transform))
+                except (httpx.HTTPError, OSError, RuntimeError) as exc:
+                    if response.status_code < 500:
+                        self._metrics.record_upstream_error(path_prefix)
+                    logger.error(
+                        "Upstream event stream failed for %s: %s",
+                        path_prefix,
+                        self._redactor.redact(str(exc)),
+                    )
+                    raise
                 finally:
                     await stream_context.__aexit__(None, None, None)
 
@@ -830,6 +860,15 @@ class MCPRouter:
                         except StopAsyncIteration:
                             break
                         yield chunk
+            except (TimeoutError, httpx.HTTPError, OSError, RuntimeError) as exc:
+                if response.status_code < 500:
+                    self._metrics.record_upstream_error(path_prefix)
+                logger.error(
+                    "Upstream streaming body failed for %s: %s",
+                    path_prefix,
+                    self._redactor.redact(str(exc)),
+                )
+                raise
             finally:
                 await stream_context.__aexit__(None, None, None)
 

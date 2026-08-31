@@ -82,6 +82,11 @@ def _reject_json_constant(value: str) -> Any:
     raise ValueError(f"Invalid JSON numeric constant: {value}")
 
 
+def parse_strict_json_text(text: str) -> Any:
+    """Parse standards-compliant JSON and reject Python's non-standard constants."""
+    return json.loads(text, parse_constant=_reject_json_constant)
+
+
 def parse_jsonrpc_request(body: bytes) -> ParsedJSONRPCRequest:
     try:
         text = body.decode("utf-8")
@@ -89,7 +94,7 @@ def parse_jsonrpc_request(body: bytes) -> ParsedJSONRPCRequest:
         raise ProtocolRequestError(PARSE_ERROR, "Request body is not valid UTF-8 JSON") from exc
 
     try:
-        payload = json.loads(text, parse_constant=_reject_json_constant)
+        payload = parse_strict_json_text(text)
     except (json.JSONDecodeError, ValueError) as exc:
         raise ProtocolRequestError(PARSE_ERROR, "Parse error") from exc
 

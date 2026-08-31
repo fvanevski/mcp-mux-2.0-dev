@@ -18,6 +18,7 @@ MockMode = Literal[
     "legacy-http-sse",
     "malformed-json",
     "invalid-utf8-json",
+    "invalid-json-constant",
     "http-failure",
     "transport-failure",
 ]
@@ -124,6 +125,12 @@ class MockMCPUpstream:
                 200,
                 headers={"content-type": "application/json"},
                 content=b'{"jsonrpc":"2.0","id":1,"result":{"text":"\xff"}}',
+            )
+        if self.mode == "invalid-json-constant":
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                content=b'{"jsonrpc":"2.0","id":1,"result":{"value":NaN}}',
             )
         if self.mode == "http-failure":
             request_id = json_body.get("id") if isinstance(json_body, dict) else None

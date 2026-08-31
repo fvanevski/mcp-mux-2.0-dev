@@ -566,8 +566,9 @@ async def test_response_task_cancelled_before_first_step_releases_leases_and_all
     [
         b'{"jsonrpc":"2.0","id":1,"result":{"text":"\xff"}}',
         b'{"jsonrpc":"2.0","id":1,"result":',
+        b'{"jsonrpc":"2.0","id":1,"result":{"value":NaN}}',
     ],
-    ids=["invalid-utf8", "malformed-json"],
+    ids=["invalid-utf8", "malformed-json", "invalid-json-constant"],
 )
 @pytest.mark.asyncio
 async def test_invalid_json_text_upstream_fails_closed_in_legacy_bridge(

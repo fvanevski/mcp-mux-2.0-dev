@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -14,9 +16,55 @@ from mcp_router.server import router
 def _reset_router():
     router._configs = {}
     router._legacy_bridge = None
+    router._metrics.denied_calls.clear()
+    router._metrics.upstream_errors.clear()
+    router._metrics.stream_cancellations.clear()
     yield
     router._configs = {}
     router._legacy_bridge = None
+    router._metrics.denied_calls.clear()
+    router._metrics.upstream_errors.clear()
+    router._metrics.stream_cancellations.clear()
+
+
+def _request(
+    method: str,
+    path_prefix: str,
+    *,
+    headers: dict[str, str] | None = None,
+    body: bytes = b"",
+) -> Request:
+    sent = False
+
+    async def receive() -> dict[str, object]:
+        nonlocal sent
+        if sent:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": method,
+        "scheme": "http",
+        "path": f"/{path_prefix}",
+        "raw_path": f"/{path_prefix}".encode(),
+        "root_path": "",
+        "query_string": b"",
+        "headers": [
+            (name.casefold().encode("latin-1"), value.encode("latin-1"))
+            for name, value in (headers or {}).items()
+        ],
+        "server": ("testserver", 80),
+        "client": ("127.0.0.1", 12345),
+        "path_params": {"path_prefix": path_prefix},
+    }
+    return Request(scope, receive)
+
+
+def _legacy_tools_list_body() -> bytes:
+    return b'{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
 
 
 @pytest.mark.asyncio
@@ -156,6 +204,145 @@ async def test_streamable_http_direct_response_json_bridge():
     assert bridge.sessions[local_session_id].remote_session_id == "remote-session-456"
     assert await queue.get() == b'event: message\ndata: {"jsonrpc":"2.0","result":{"protocolVersion":"2024-11-05"},"id":1}\n\n'
     await bridge.close_all()
+
+
+@pytest.mark.asyncio
+async def test_streamable_event_stream_read_failure_is_counted_and_closes_upstream() -> None:
+    router._configs = {
+        "stream": EndpointConfig(
+            path="stream",
+            mode="remote",
+            url="https://upstream.test/mcp",
+            summary="Streaming failure fixture",
+            transport="streamable-http",
+        )
+    }
+
+    async def upstream_lines() -> AsyncIterator[str]:
+        yield "event: message"
+        yield 'data: {"jsonrpc":"2.0","id":1,"result":{"tools":[]}}'
+        yield ""
+        raise httpx.ReadError("stream read failed")
+
+    upstream_response = MagicMock()
+    upstream_response.status_code = 200
+    upstream_response.headers = httpx.Headers({"content-type": "text/event-stream"})
+    upstream_response.aiter_lines = upstream_lines
+    stream_context = MagicMock()
+    stream_context.__aenter__ = AsyncMock(return_value=upstream_response)
+    stream_context.__aexit__ = AsyncMock(return_value=None)
+    client = MagicMock()
+    client.stream = MagicMock(return_value=stream_context)
+
+    with patch.object(router, "_get_http_client", new=AsyncMock(return_value=client)):
+        response = await router.catch_all_proxy(
+            _request(
+                "POST",
+                "stream",
+                headers={"content-type": "application/json"},
+                body=_legacy_tools_list_body(),
+            )
+        )
+
+    iterator = cast(AsyncIterator[bytes], response.body_iterator)
+    assert b"event: message" in await anext(iterator)
+    with pytest.raises(httpx.ReadError, match="stream read failed"):
+        await anext(iterator)
+
+    assert router._metrics.snapshot("stream")["upstream_errors_total"] == 1
+    assert router._runtimes["stream"].active_leases == 0
+    stream_context.__aexit__.assert_awaited_once_with(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_streaming_body_read_failure_is_counted_and_closes_upstream() -> None:
+    router._configs = {
+        "stream": EndpointConfig(
+            path="stream",
+            mode="remote",
+            url="https://upstream.test/mcp",
+            summary="Streaming body failure fixture",
+            transport="streamable-http",
+        )
+    }
+
+    async def upstream_bytes() -> AsyncIterator[bytes]:
+        yield b"first"
+        raise httpx.ReadError("body read failed")
+
+    upstream_response = MagicMock()
+    upstream_response.status_code = 200
+    upstream_response.headers = httpx.Headers({"content-type": "application/octet-stream"})
+    upstream_response.aiter_bytes = upstream_bytes
+    stream_context = MagicMock()
+    stream_context.__aenter__ = AsyncMock(return_value=upstream_response)
+    stream_context.__aexit__ = AsyncMock(return_value=None)
+    client = MagicMock()
+    client.stream = MagicMock(return_value=stream_context)
+
+    with patch.object(router, "_get_http_client", new=AsyncMock(return_value=client)):
+        response = await router.catch_all_proxy(
+            _request(
+                "POST",
+                "stream",
+                headers={"content-type": "application/json"},
+                body=_legacy_tools_list_body(),
+            )
+        )
+
+    iterator = cast(AsyncIterator[bytes], response.body_iterator)
+    assert await anext(iterator) == b"first"
+    with pytest.raises(httpx.ReadError, match="body read failed"):
+        await anext(iterator)
+
+    assert router._metrics.snapshot("stream")["upstream_errors_total"] == 1
+    assert router._runtimes["stream"].active_leases == 0
+    stream_context.__aexit__.assert_awaited_once_with(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_legacy_http_sse_read_failure_is_counted_and_closes_upstream() -> None:
+    router._configs = {
+        "legacy-sse": EndpointConfig(
+            path="legacy-sse",
+            mode="remote",
+            url="https://upstream.test/mcp/sse",
+            summary="Legacy SSE failure fixture",
+            transport="sse",
+        )
+    }
+
+    async def upstream_lines() -> AsyncIterator[str]:
+        yield "event: endpoint"
+        yield "data: /mcp/messages/?session_id=legacy-1"
+        yield ""
+        raise httpx.ReadError("legacy SSE read failed")
+
+    upstream_response = MagicMock()
+    upstream_response.status_code = 200
+    upstream_response.headers = httpx.Headers({"content-type": "text/event-stream"})
+    upstream_response.aiter_lines = upstream_lines
+    stream_context = MagicMock()
+    stream_context.__aenter__ = AsyncMock(return_value=upstream_response)
+    stream_context.__aexit__ = AsyncMock(return_value=None)
+    client = MagicMock()
+    client.stream = MagicMock(return_value=stream_context)
+
+    with patch.object(router, "_get_http_client", new=AsyncMock(return_value=client)):
+        response = await router.catch_all_proxy(
+            _request("GET", "legacy-sse", headers={"accept": "text/event-stream"})
+        )
+
+    iterator = cast(AsyncIterator[bytes], response.body_iterator)
+    first = await anext(iterator)
+    assert b"event: endpoint" in first
+    assert b"/legacy-sse/mcp/messages/?session_id=legacy-1" in first
+    with pytest.raises(httpx.ReadError, match="legacy SSE read failed"):
+        await anext(iterator)
+
+    assert router._metrics.snapshot("legacy-sse")["upstream_errors_total"] == 1
+    assert router._runtimes["legacy-sse"].active_leases == 0
+    stream_context.__aexit__.assert_awaited_once_with(None, None, None)
 
 
 @pytest.mark.asyncio
