@@ -3,7 +3,7 @@
 # ==========================================
 
 # --- Local Configuration ---
-./mcp_router/config.yaml
+mcp_router/config.yaml
 
 # --- Environment & Secrets ---
 .env

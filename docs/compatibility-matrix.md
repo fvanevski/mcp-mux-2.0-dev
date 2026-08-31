@@ -38,7 +38,7 @@ OpenCode configuration also contains a `/postgres` route in operator files, but 
 
 ### Repository-declared active upstream identities
 
-The frozen branch `mcp_router/config.yaml` independently establishes four active upstream identities:
+The tracked frozen baseline `tests/fixtures/compatibility-baseline-config.yaml` independently establishes four active upstream identities:
 
 | Scenario ID | Namespace | Mode | Configured upstream | Inferred transport | Regression |
 |---|---|---|---|---|---|
@@ -248,7 +248,7 @@ Tests that encode a behavior being intentionally broken must be reclassified alo
 - `mcp_router/server.py`
 - `mcp_router/core/config_loader.py`
 - `mcp_router/core/process_manager.py`
-- `mcp_router/config.yaml`
+- `tests/fixtures/compatibility-baseline-config.yaml`
 - `tests/test_configuration.py`, `tests/test_policy.py`, `tests/test_proxy.py`, `tests/test_streaming.py`, `tests/test_process.py`, and `tests/test_reload.py`
 - `tests/test_compatibility_baseline.py`
 - `tests/fixtures/mock_upstream.py`

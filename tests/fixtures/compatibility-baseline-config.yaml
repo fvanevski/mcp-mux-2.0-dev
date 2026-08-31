@@ -1,0 +1,31 @@
+# Frozen compatibility baseline: the four active upstream identities.
+# Tracked so the contract is verifiable from a fresh checkout.
+# Operator-local configuration remains in mcp_router/config.yaml (untracked).
+endpoints:
+  - path: "web-search"
+    mode: "remote"
+    url: "https://mcp.garion.us/mcp"
+    transport: "streamable-http"
+    summary: "Google Search and content extraction tool"
+
+  - path: "firecrawl"
+    mode: "managed_cli"
+    unsafe_shell_command: "npx --yes firecrawl-mcp"
+    url: "http://localhost:3033/mcp"
+    transport: "streamable-http"
+    readiness:
+      host: "localhost"
+      port: 3033
+    summary: "Firecrawl Web Content Extraction Tool"
+
+  - path: "huggingface"
+    mode: "remote"
+    url: "https://huggingface.co/mcp"
+    transport: "streamable-http"
+    summary: "HuggingFace MCP Server — model search, hub browsing, model download"
+
+  - path: "context7"
+    mode: "remote"
+    url: "https://mcp.context7.com/mcp"
+    transport: "streamable-http"
+    summary: "Context7 documentation lookup and indexing system"
