@@ -1140,7 +1140,7 @@ CONFIG_PATH = os.environ.get("MCP_MUX_CONFIG", os.path.join(BASE_DIR, "config.ya
 
 
 @asynccontextmanager
-async def lifespan(app: Starlette):
+async def lifespan(app: object):
     del app
     logger.info("Initializing MCP Router Lifespan...")
     await router.open_http_client()
