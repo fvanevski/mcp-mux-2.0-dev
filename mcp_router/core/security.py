@@ -105,9 +105,9 @@ def _origin_allowed(value: str, security: SecurityConfig) -> bool:
 def validate_bind_security(host: str, security: SecurityConfig) -> None:
     if is_loopback_host(host):
         return
-    if security.mode != "authenticated":
+    if security.mode not in {"remote", "authenticated"}:
         raise ValueError(
-            "Non-loopback binding requires security.mode='authenticated' with an explicit authentication provider"
+            "Non-loopback binding requires security.mode='remote' or security.mode='authenticated'"
         )
 
 
@@ -279,6 +279,8 @@ class GatewaySecurityMiddleware:
         principal: str
         if security.mode == "local_only":
             principal = "local"
+        elif security.mode == "remote":
+            principal = "remote"
         else:
             authenticated_principal = self._authenticated_principal(headers, peer, security)
             if authenticated_principal is None:

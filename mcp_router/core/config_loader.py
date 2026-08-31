@@ -148,7 +148,7 @@ def _validate_header_name(value: str, field_name: str) -> str:
 class SecurityConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
-    mode: Literal["local_only", "authenticated"] = "local_only"
+    mode: Literal["local_only", "remote", "authenticated"] = "local_only"
     allowed_hosts: list[str] = Field(
         default_factory=lambda: ["127.0.0.1", "localhost", "::1"],
     )

@@ -2,7 +2,9 @@
 
 ## Network exposure
 
-The default deployment is loopback-only. Keep `--host 127.0.0.1` unless remote access is required. A non-loopback bind is rejected unless `security.mode: authenticated` is configured.
+The default deployment is loopback-only. Keep `--host 127.0.0.1` unless a direct non-loopback bind is required. A non-loopback bind is rejected under `local_only`; it is permitted only with explicit `security.mode: remote` or `security.mode: authenticated`.
+
+For anonymous remote exposure, `remote` allows non-loopback/reverse-proxied callers without a global mux API key while still enforcing explicit `allowed_hosts` and `allowed_origins`. Those allowlists are request-boundary controls, not authentication. An absent `Origin` remains acceptable; a present Origin must be allowlisted. Do not treat private or high-entropy endpoint paths as strong authentication. Where consequential tools require stronger access control, terminate authentication at a controlled reverse proxy/upstream boundary or use `authenticated` mode.
 
 For authenticated exposure:
 
