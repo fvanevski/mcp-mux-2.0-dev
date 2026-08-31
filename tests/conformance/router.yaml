@@ -1,0 +1,6 @@
+endpoints:
+  - path: conformance
+    mode: remote
+    url: http://127.0.0.1:3001/mcp
+    transport: streamable-http
+    summary: Official MCP Everything server proxied for conformance testing

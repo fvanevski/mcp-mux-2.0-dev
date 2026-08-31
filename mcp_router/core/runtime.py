@@ -40,6 +40,7 @@ class EndpointRuntime:
     last_exit_code: int | None = None
     failure_reason: str | None = None
     restart_attempts: int = 0
+    process_restarts_total: int = 0
     legacy_session_ids: set[str] = field(default_factory=set, repr=False)
     legacy_tasks: set[asyncio.Task[object]] = field(default_factory=set, repr=False)
     _lease_condition: asyncio.Condition = field(default_factory=asyncio.Condition, repr=False)

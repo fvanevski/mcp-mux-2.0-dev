@@ -24,6 +24,7 @@ from pydantic import (
 logger = logging.getLogger(__name__)
 ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 ROUTE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_RESERVED_ROUTE_NAMES = frozenset({"summary", "metrics"})
 ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 HEADER_NAME_PATTERN = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _FORBIDDEN_INBOUND_HEADERS = {
@@ -288,8 +289,9 @@ class EndpointBase(BaseModel):
         path = value.strip()
         if not path:
             raise ValueError("path must not be empty")
-        if path.casefold() == "summary":
-            raise ValueError("path 'summary' is reserved")
+        normalized_path = path.casefold()
+        if normalized_path in _RESERVED_ROUTE_NAMES:
+            raise ValueError(f"path '{normalized_path}' is reserved")
         if "/" in path:
             raise ValueError("path must be a single route namespace and cannot contain '/'")
         if not ROUTE_NAME_PATTERN.fullmatch(path):

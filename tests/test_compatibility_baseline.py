@@ -14,6 +14,7 @@ from tests.fixtures.mock_upstream import (
     MODERN_PROTOCOL_VERSION,
     PROTOCOL_VERSION_META,
     MockMCPUpstream,
+    MockMode,
 )
 
 OPERATOR_VERIFIED_MODERN_SCENARIOS = [
@@ -30,10 +31,16 @@ def _reset_router_runtime_state():
     router._configs = {}
     router._http_client = None
     router._legacy_bridge = None
+    router._metrics.denied_calls.clear()
+    router._metrics.upstream_errors.clear()
+    router._metrics.stream_cancellations.clear()
     yield
     router._configs = {}
     router._http_client = None
     router._legacy_bridge = None
+    router._metrics.denied_calls.clear()
+    router._metrics.upstream_errors.clear()
+    router._metrics.stream_cancellations.clear()
 
 
 def _outbound_client_factory(upstream: MockMCPUpstream):
@@ -300,6 +307,66 @@ async def test_modern_fixture_does_not_use_legacy_session_header_for_protocol_st
 
     assert response.status_code == 200
     assert response.json()["result"]["resultType"] == "complete"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "expected_status", "expected_error"),
+    [
+        ("malformed-json", 502, "Upstream returned malformed JSON"),
+        ("invalid-utf8-json", 502, "Upstream returned malformed JSON"),
+        ("invalid-json-constant", 502, "Upstream returned malformed JSON"),
+        ("http-failure", 503, "deterministic upstream failure"),
+        ("transport-failure", 502, "Upstream proxy request failed"),
+    ],
+    ids=[
+        "malformed-json",
+        "invalid-utf8-json",
+        "invalid-json-constant",
+        "http-503",
+        "transport-failure",
+    ],
+)
+async def test_negative_upstream_fixtures_fail_closed_and_are_observable(
+    mode: MockMode,
+    expected_status: int,
+    expected_error: str,
+):
+    router._configs = {
+        "negative": EndpointConfig(
+            path="negative",
+            mode="remote",
+            url="http://mock-upstream.local/mcp",
+            summary=f"Deterministic negative fixture: {mode}",
+            transport="streamable-http",
+        )
+    }
+    upstream = MockMCPUpstream(mode)
+    inbound_transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=inbound_transport, base_url="http://localhost") as client:
+        with patch(
+            "mcp_router.server.httpx.AsyncClient",
+            side_effect=_outbound_client_factory(upstream),
+        ):
+            response = await client.post(
+                "/negative",
+                json=_modern_request(1, "tools/list"),
+                headers={
+                    "MCP-Protocol-Version": MODERN_PROTOCOL_VERSION,
+                    "Mcp-Method": "tools/list",
+                    "Accept": "application/json",
+                },
+            )
+            metrics = (await client.get("/metrics")).json()["endpoints"][0]
+
+    assert response.status_code == expected_status
+    if mode == "http-failure":
+        assert response.json()["error"]["message"] == expected_error
+    else:
+        assert response.json()["error"] == expected_error
+    assert metrics["upstream_errors_total"] == 1
+    assert len(upstream.requests) == 1
 
 
 @pytest.mark.asyncio

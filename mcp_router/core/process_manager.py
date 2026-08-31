@@ -369,6 +369,7 @@ class ProcessManager:
                         or attempt > restart.max_attempts
                     ):
                         return
+                    runtime.process_restarts_total += 1
                     try:
                         await self._start_locked(
                             runtime,

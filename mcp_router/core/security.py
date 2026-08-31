@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hmac
 import ipaddress
+import re
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from typing import Any
+from urllib.parse import urlsplit
 
 from starlette.responses import JSONResponse
 
@@ -47,13 +49,25 @@ _DEFAULT_UPSTREAM_REQUEST_HEADERS = {
     "last-event-id",
     "traceparent",
     "tracestate",
-    "baggage",
 }
 _SENSITIVE_RESPONSE_HEADERS = {
     "authorization",
     "proxy-authorization",
     "set-cookie",
 }
+_TRACEPARENT_V00_RE = re.compile(
+    r"^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$"
+)
+
+
+def _valid_traceparent(value: str | None) -> bool:
+    if value is None:
+        return False
+    match = _TRACEPARENT_V00_RE.fullmatch(value)
+    if match is None:
+        return False
+    trace_id, parent_id, _ = match.groups()
+    return trace_id != "0" * 32 and parent_id != "0" * 16
 
 
 def is_loopback_host(host: str) -> bool:
@@ -64,6 +78,28 @@ def is_loopback_host(host: str) -> bool:
         return ipaddress.ip_address(candidate).is_loopback
     except ValueError:
         return False
+
+
+def _origin_allowed(value: str, security: SecurityConfig) -> bool:
+    if value in security.allowed_origins:
+        return True
+    if security.mode != "local_only":
+        return False
+    try:
+        parsed = urlsplit(value)
+        _ = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme in {"http", "https"}
+        and parsed.hostname is not None
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.path in {"", "/"}
+        and not parsed.query
+        and not parsed.fragment
+        and is_loopback_host(parsed.hostname)
+    )
 
 
 def validate_bind_security(host: str, security: SecurityConfig) -> None:
@@ -80,6 +116,11 @@ def build_upstream_headers(
     endpoint: Endpoint,
 ) -> dict[str, str]:
     extra = {name.casefold() for name in endpoint.inbound_headers}
+    traceparent = next(
+        (value for key, value in inbound.items() if key.casefold() == "traceparent"),
+        None,
+    )
+    valid_trace_context = _valid_traceparent(traceparent)
     headers: dict[str, str] = {}
     for key, value in inbound.items():
         lower = key.casefold()
@@ -89,6 +130,10 @@ def build_upstream_headers(
             or lower in _FORWARDED_IDENTITY_HEADERS
             or lower.startswith("x-forwarded-")
         ):
+            continue
+        if lower in {"traceparent", "tracestate"} and not valid_trace_context:
+            continue
+        if lower == "tracestate" and len(value) > 512:
             continue
         if (
             lower in _DEFAULT_UPSTREAM_REQUEST_HEADERS
@@ -212,7 +257,7 @@ class GatewaySecurityMiddleware:
             return
 
         origin = headers.get("origin")
-        if origin is not None and origin not in security.allowed_origins:
+        if origin is not None and not _origin_allowed(origin, security):
             await self._reject(scope, receive, send, 403, "Invalid Origin")
             return
 

@@ -16,6 +16,11 @@ MockMode = Literal[
     "modern-stateless",
     "legacy-sessionful",
     "legacy-http-sse",
+    "malformed-json",
+    "invalid-utf8-json",
+    "invalid-json-constant",
+    "http-failure",
+    "transport-failure",
 ]
 
 
@@ -30,7 +35,7 @@ class RecordedRequest:
 
 @dataclass
 class MockMCPUpstream:
-    """Deterministic in-process MCP upstream used by Phase 0 compatibility tests."""
+    """Deterministic in-process MCP upstream for compatibility and failure-path tests."""
 
     mode: MockMode
     requests: list[RecordedRequest] = field(default_factory=list)
@@ -109,6 +114,37 @@ class MockMCPUpstream:
             return self._handle_legacy_sessionful(request, headers, json_body)
         if self.mode == "legacy-http-sse":
             return self._handle_legacy_http_sse(request)
+        if self.mode == "malformed-json":
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                content=b'{"jsonrpc":"2.0","id":1,"result":',
+            )
+        if self.mode == "invalid-utf8-json":
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                content=b'{"jsonrpc":"2.0","id":1,"result":{"text":"\xff"}}',
+            )
+        if self.mode == "invalid-json-constant":
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                content=b'{"jsonrpc":"2.0","id":1,"result":{"value":NaN}}',
+            )
+        if self.mode == "http-failure":
+            request_id = json_body.get("id") if isinstance(json_body, dict) else None
+            return self._jsonrpc_error(
+                request_id,
+                code=-32000,
+                message="deterministic upstream failure",
+                status_code=503,
+            )
+        if self.mode == "transport-failure":
+            raise httpx.ConnectError(
+                "deterministic upstream transport failure",
+                request=request,
+            )
         raise AssertionError(f"Unsupported mock mode: {self.mode}")
 
     def _handle_modern(

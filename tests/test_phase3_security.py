@@ -763,7 +763,10 @@ async def test_endpoint_and_tool_concurrency_limits_release_cleanly() -> None:
 
 
 @pytest.mark.asyncio
-async def test_concurrency_lease_released_when_buffered_upstream_read_fails() -> None:
+@pytest.mark.parametrize("upstream_status", [200, 503])
+async def test_concurrency_lease_released_when_buffered_upstream_read_fails(
+    upstream_status: int,
+) -> None:
     isolated = MCPRouter(Starlette(), "/tmp/not-used.yaml")
     endpoint = EndpointConfig(
         path="example",
@@ -774,6 +777,7 @@ async def test_concurrency_lease_released_when_buffered_upstream_read_fails() ->
     )
     isolated._configs = {"example": endpoint}
     response, stream_context = json_upstream_response(b"unused")
+    response.status_code = upstream_status
     response.aread = AsyncMock(
         side_effect=httpx.ReadError(
             "read failed",
@@ -782,13 +786,17 @@ async def test_concurrency_lease_released_when_buffered_upstream_read_fails() ->
     )
     isolated._http_client, _ = fake_client_for(stream_context)
 
-    with pytest.raises(httpx.ReadError, match="read failed"):
-        await isolated.catch_all_proxy(
-            direct_request(
-                body={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
-                headers={"content-type": "application/json"},
-            )
+    failed = await isolated.catch_all_proxy(
+        direct_request(
+            body={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+            headers={"content-type": "application/json"},
         )
+    )
+
+    assert failed.status_code == 502
+    assert json.loads(bytes(failed.body)) == {"error": "Upstream response read failed"}
+    assert isolated._metrics.snapshot("example")["upstream_errors_total"] == 1
+    stream_context.__aexit__.assert_awaited_once_with(None, None, None)
 
     reacquired_lease, reacquired_rejection = await isolated._limiter.acquire(endpoint)
     assert reacquired_lease is not None
