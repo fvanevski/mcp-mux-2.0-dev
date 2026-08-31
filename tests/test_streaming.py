@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from starlette.requests import Request
+from starlette.responses import StreamingResponse
 
 from mcp_router.core.config_loader import EndpointConfig
 from mcp_router.server import router
@@ -244,6 +245,7 @@ async def test_streamable_event_stream_read_failure_is_counted_and_closes_upstre
             )
         )
 
+    assert isinstance(response, StreamingResponse)
     iterator = cast(AsyncIterator[bytes], response.body_iterator)
     assert b"event: message" in await anext(iterator)
     with pytest.raises(httpx.ReadError, match="stream read failed"):
@@ -290,6 +292,7 @@ async def test_streaming_body_read_failure_is_counted_and_closes_upstream() -> N
             )
         )
 
+    assert isinstance(response, StreamingResponse)
     iterator = cast(AsyncIterator[bytes], response.body_iterator)
     assert await anext(iterator) == b"first"
     with pytest.raises(httpx.ReadError, match="body read failed"):
@@ -333,6 +336,7 @@ async def test_legacy_http_sse_read_failure_is_counted_and_closes_upstream() -> 
             _request("GET", "legacy-sse", headers={"accept": "text/event-stream"})
         )
 
+    assert isinstance(response, StreamingResponse)
     iterator = cast(AsyncIterator[bytes], response.body_iterator)
     first = await anext(iterator)
     assert b"event: endpoint" in first
