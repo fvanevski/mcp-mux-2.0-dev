@@ -155,10 +155,10 @@ The fixture remains the deterministic oracle for a correct modern peer. Phase 2 
 | `CUR-02` | The Phase 2 edge rejects JSON-RPC batch bodies instead of repairing or forwarding batch items. | Intended v0.2.0 breaking change | `test_streamable_http_direct_post_rejects_jsonrpc_batch` + Phase 2 protocol-edge regressions |
 | `CUR-02A` | Strict JSON parsing rejects the non-standard numeric constants `NaN`, `Infinity`, and `-Infinity`; invalid raw bytes are never forwarded upstream. | Phase 2 target | `test_parse_rejects_non_json_numeric_constants` + `test_invalid_streamable_requests_are_rejected_before_upstream` |
 | `CUR-03` | Current tool policy projects `tools/list` with allow/deny lists. | Current behavior | existing filter tests |
-| `CUR-04` | Tool-list projection does not prove direct-call authorization. | Known security defect | Phase 3 |
+| `CUR-04` | Tool-list projection and direct named-capability authorization share the endpoint policy source; a denied/hidden capability cannot be invoked directly merely because list projection hid it. | Current Phase 3 security behavior | `test_tools_list_projection_and_direct_call_share_policy_source`, `test_denied_modern_tool_call_never_reaches_upstream`, `test_denied_legacy_tool_call_uses_body_policy_and_never_reaches_upstream` |
 | `CUR-05` | Rebuilt JSON responses strip stale encoding/length headers. | Current response-safety behavior | existing regression |
-| `CUR-06` | An upstream that labels a response `application/json` but returns invalid UTF-8 or malformed JSON framing is contained at the gateway as HTTP 502 rather than repaired/replaced and forwarded as a successful MCP response; the legacy bridge likewise terminates either invalid JSON-text form as an upstream failure. | Phase 6 release hardening | `test_negative_upstream_fixtures_fail_closed_and_are_observable[malformed-json]`, `[invalid-utf8-json]` + `test_invalid_json_text_upstream_fails_closed_in_legacy_bridge[invalid-utf8]`, `[malformed-json]` |
-| `CUR-07` | Deterministic upstream HTTP 503 and transport failures are client-observable and increment the endpoint upstream-error counter exactly once. | Phase 6 release hardening | `test_negative_upstream_fixtures_fail_closed_and_are_observable[http-503]` + `[transport-failure]` |
+| `CUR-06` | An upstream that labels a response `application/json` but returns invalid UTF-8, malformed JSON framing, or Python-accepted/non-standard JSON constants such as `NaN` is contained at the gateway as HTTP 502 rather than repaired/accepted and forwarded as a successful MCP response; the legacy bridge terminates the same invalid JSON-text forms as upstream failures. | Phase 6 release hardening | `test_negative_upstream_fixtures_fail_closed_and_are_observable[malformed-json]`, `[invalid-utf8-json]`, `[invalid-json-constant]` + `test_invalid_json_text_upstream_fails_closed_in_legacy_bridge[invalid-utf8]`, `[malformed-json]`, `[invalid-json-constant]` |
+| `CUR-07` | Deterministic upstream setup, HTTP 5xx, buffered body-read, and midstream response failures are observable with exactly-once endpoint failure accounting where gateway metrics own the path; buffered JSON body-read failures are converted to gateway 502 before forwarding, while already-started streams terminate and close upstream deterministically. | Phase 6 release hardening | `test_negative_upstream_fixtures_fail_closed_and_are_observable[http-503]`, `[transport-failure]`; `test_concurrency_lease_released_when_buffered_upstream_read_fails`; `test_streamable_event_stream_read_failure_is_counted_and_closes_upstream`; `test_streaming_body_read_failure_is_counted_and_closes_upstream`; `test_legacy_http_sse_read_failure_is_counted_and_closes_upstream` |
 
 ### F. Managed and remote endpoint behavior
 
@@ -173,7 +173,7 @@ The fixture remains the deterministic oracle for a correct modern peer. Phase 2 
 
 ## Deterministic mock upstream authority
 
-`tests/fixtures/mock_upstream.py` provides seven in-process `httpx.MockTransport` modes:
+`tests/fixtures/mock_upstream.py` provides eight in-process `httpx.MockTransport` modes:
 
 | Mode | Contract |
 |---|---|
@@ -182,10 +182,11 @@ The fixture remains the deterministic oracle for a correct modern peer. Phase 2 
 | `legacy-http-sse` | Emits a deterministic endpoint event and accepts the corresponding legacy message POST. |
 | `malformed-json` | Returns a deterministic `application/json` response with invalid JSON framing so the gateway's fail-closed upstream-response handling is exercised. |
 | `invalid-utf8-json` | Returns JSON-shaped `application/json` bytes containing invalid UTF-8 so lossy replacement cannot silently turn an invalid wire payload into a successful response. |
+| `invalid-json-constant` | Returns otherwise JSON-shaped `application/json` containing non-standard `NaN`, which Python's default decoder accepts but the mux's strict JSON policy must reject. |
 | `http-failure` | Returns a deterministic HTTP 503 JSON-RPC error so status/error propagation and upstream-error metrics are exercised. |
 | `transport-failure` | Raises a deterministic `httpx.ConnectError` so transport-failure containment and upstream-error metrics are exercised. |
 
-These fixtures make no live network calls and remain deterministic compatibility oracles. Phase 6 supplements them with the official MCP conformance runner against an official Everything server proxied through the mux; conformance does not replace the fixture-level negative and compatibility regressions. The negative fixture regression requires invalid UTF-8 and malformed JSON framing to fail closed as gateway HTTP 502 without lossy repair or exposure of the malformed body, while deterministic HTTP and transport failures remain observable through `upstream_errors_total`.
+These fixtures make no live network calls and remain deterministic compatibility oracles. Phase 6 supplements them with the official MCP conformance runner against an official Everything server proxied through the mux; conformance does not replace the fixture-level negative and compatibility regressions. The negative fixture regression requires invalid UTF-8, malformed JSON framing, and non-standard JSON constants to fail closed as gateway HTTP 502 without lossy repair/acceptance or exposure of the invalid body. Additional response-read regressions prove buffered read failures become gateway 502 responses and already-started event/binary/legacy-SSE streams record one upstream error, close their upstream context, release leases, and terminate rather than silently completing.
 
 ## Preservation invariants
 

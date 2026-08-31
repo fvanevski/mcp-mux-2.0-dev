@@ -28,7 +28,7 @@
 | Unbounded stream/session work | Runtime leases, bridge queue/session limits, TTL/backpressure policy, cancellation cleanup, and endpoint retirement bound work. |
 | Managed child escape/leak | Structured `argv` is preferred, shell execution is explicitly marked unsafe, child process groups are terminated on cleanup, and restart attempts are bounded. |
 | Reload races | Runtime-affecting configuration changes drain old runtimes before atomic publication of the new snapshot. |
-| Malformed/failing upstream | An upstream response labeled `application/json` must be valid UTF-8 and parse as JSON or the gateway returns a generated 502 without lossy repair or forwarding the malformed body; the legacy bridge terminates invalid JSON text as an upstream failure; HTTP/transport failures remain observable through bounded status/error handling and counters. |
+| Malformed/failing upstream | An upstream response labeled `application/json` must be valid UTF-8 and satisfy the same strict JSON syntax policy as inbound requests, including rejection of non-standard constants such as `NaN`, `Infinity`, and `-Infinity`; otherwise the gateway returns a generated 502 without lossy repair/acceptance or forwarding the invalid body, and the legacy bridge terminates the invalid JSON text as an upstream failure. Setup, HTTP 5xx, buffered body-read, and midstream transport failures are counted without double-counting; buffered failures are contained before forwarding when possible, while already-started streams close upstream and terminate deterministically. |
 | Stale validation evidence | Repository assessment binds exact base/head SHAs; PR/gate decisions remain separate from host evidence. |
 
 ## Residual risk
