@@ -335,14 +335,13 @@ async def test_legacy_http_sse_read_failure_is_counted_and_closes_upstream() -> 
         response = await router.catch_all_proxy(
             _request("GET", "legacy-sse", headers={"accept": "text/event-stream"})
         )
-
-    assert isinstance(response, StreamingResponse)
-    iterator = cast(AsyncIterator[bytes], response.body_iterator)
-    first = await anext(iterator)
-    assert b"event: endpoint" in first
-    assert b"/legacy-sse/mcp/messages/?session_id=legacy-1" in first
-    with pytest.raises(httpx.ReadError, match="legacy SSE read failed"):
-        await anext(iterator)
+        assert isinstance(response, StreamingResponse)
+        iterator = cast(AsyncIterator[bytes], response.body_iterator)
+        first = await anext(iterator)
+        assert b"event: endpoint" in first
+        assert b"/legacy-sse/mcp/messages/?session_id=legacy-1" in first
+        with pytest.raises(httpx.ReadError, match="legacy SSE read failed"):
+            await anext(iterator)
 
     assert router._metrics.snapshot("legacy-sse")["upstream_errors_total"] == 1
     assert router._runtimes["legacy-sse"].active_leases == 0
