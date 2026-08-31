@@ -7,6 +7,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from starlette.middleware.errors import ServerErrorMiddleware
+from starlette.requests import ClientDisconnect
+from starlette.responses import StreamingResponse
 
 from mcp_router.core.config_loader import EndpointConfig
 from mcp_router.core.observability import (
@@ -65,7 +68,7 @@ def _json_stream(payload: bytes, *, status_code: int = 200):
 
 
 @pytest.mark.asyncio
-async def test_stream_cancellation_increments_metric_and_records_cancelled_outcome(caplog):
+async def test_task_cancellation_records_cancelled_outcome_without_stream_disconnect_metric(caplog):
     metrics = GatewayMetrics()
 
     async def cancelled_app(
@@ -98,6 +101,64 @@ async def test_stream_cancellation_increments_metric_and_records_cancelled_outco
         await middleware(scope, receive, send)
 
     assert sent == []
+    assert metrics.snapshot("weather")["stream_cancellations_total"] == 0
+    records = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == "mcp_router.requests"
+    ]
+    assert records[-1]["endpoint"] == "weather"
+    assert records[-1]["status"] == 499
+    assert records[-1]["cancelled"] is True
+
+
+@pytest.mark.asyncio
+async def test_asgi23_stream_disconnect_message_is_counted_and_logged_once(caplog):
+    metrics = GatewayMetrics()
+    stream_started = asyncio.Event()
+    never = asyncio.Event()
+
+    async def body():
+        yield b"first"
+        await never.wait()
+
+    async def streaming_app(
+        scope: ASGIMessage,
+        receive: ASGIReceive,
+        send: ASGISend,
+    ) -> None:
+        scope["mcp.endpoint"] = "weather"
+        await StreamingResponse(body(), media_type="text/event-stream")(scope, receive, send)
+
+    receive_count = 0
+
+    async def receive() -> ASGIMessage:
+        nonlocal receive_count
+        receive_count += 1
+        if receive_count == 1:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await stream_started.wait()
+        return {"type": "http.disconnect"}
+
+    sent: list[ASGIMessage] = []
+
+    async def send(message: ASGIMessage) -> None:
+        sent.append(message)
+        if message.get("type") == "http.response.start":
+            stream_started.set()
+
+    middleware = GatewayObservabilityMiddleware(streaming_app, metrics=metrics)
+    scope: ASGIMessage = {
+        "type": "http",
+        "method": "GET",
+        "path": "/weather",
+        "headers": [],
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+    }
+    caplog.set_level(logging.INFO, logger="mcp_router.requests")
+
+    await middleware(scope, receive, send)
+
     assert metrics.snapshot("weather")["stream_cancellations_total"] == 1
     records = [
         json.loads(record.message)
@@ -107,6 +168,110 @@ async def test_stream_cancellation_increments_metric_and_records_cancelled_outco
     assert records[-1]["endpoint"] == "weather"
     assert records[-1]["status"] == 499
     assert records[-1]["cancelled"] is True
+
+
+@pytest.mark.asyncio
+async def test_asgi24_failed_stream_send_is_counted_and_logged_once(caplog):
+    metrics = GatewayMetrics()
+
+    async def body():
+        yield b"first"
+
+    async def streaming_app(
+        scope: ASGIMessage,
+        receive: ASGIReceive,
+        send: ASGISend,
+    ) -> None:
+        scope["mcp.endpoint"] = "weather"
+        await StreamingResponse(body(), media_type="text/event-stream")(scope, receive, send)
+
+    async def receive() -> ASGIMessage:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    sent: list[ASGIMessage] = []
+
+    async def send(message: ASGIMessage) -> None:
+        sent.append(message)
+        if message.get("type") == "http.response.body" and message.get("more_body"):
+            raise OSError("client disconnected")
+
+    middleware = GatewayObservabilityMiddleware(streaming_app, metrics=metrics)
+    scope: ASGIMessage = {
+        "type": "http",
+        "method": "GET",
+        "path": "/weather",
+        "headers": [],
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+    }
+    caplog.set_level(logging.INFO, logger="mcp_router.requests")
+
+    with pytest.raises(ClientDisconnect):
+        await middleware(scope, receive, send)
+
+    assert metrics.snapshot("weather")["stream_cancellations_total"] == 1
+    records = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == "mcp_router.requests"
+    ]
+    assert records[-1]["endpoint"] == "weather"
+    assert records[-1]["status"] == 499
+    assert records[-1]["cancelled"] is True
+
+
+@pytest.mark.asyncio
+async def test_outer_observability_adds_request_id_to_framework_generated_500(caplog):
+    metrics = GatewayMetrics()
+    request_id = "req-framework-500"
+
+    async def failing_app(
+        scope: ASGIMessage,
+        receive: ASGIReceive,
+        send: ASGISend,
+    ) -> None:
+        del receive, send
+        scope["mcp.endpoint"] = "weather"
+        raise RuntimeError("boom")
+
+    async def receive() -> ASGIMessage:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    sent: list[ASGIMessage] = []
+
+    async def send(message: ASGIMessage) -> None:
+        sent.append(message)
+
+    middleware = GatewayObservabilityMiddleware(
+        ServerErrorMiddleware(failing_app),
+        metrics=metrics,
+    )
+    scope: ASGIMessage = {
+        "type": "http",
+        "method": "GET",
+        "path": "/weather",
+        "headers": [(b"x-request-id", request_id.encode("ascii"))],
+    }
+    caplog.set_level(logging.INFO, logger="mcp_router.requests")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await middleware(scope, receive, send)
+
+    start = next(message for message in sent if message.get("type") == "http.response.start")
+    response_headers = dict(start["headers"])
+    assert start["status"] == 500
+    assert response_headers[b"x-request-id"] == request_id.encode("ascii")
+    records = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == "mcp_router.requests"
+    ]
+    assert records[-1]["request_id"] == request_id
+    assert records[-1]["status"] == 500
+
+
+def test_exported_app_places_observability_outside_starlette_error_boundary():
+    assert isinstance(app, GatewayObservabilityMiddleware)
+    assert app.app is router.app
 
 
 @pytest.mark.asyncio

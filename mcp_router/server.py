@@ -252,10 +252,6 @@ class MCPRouter:
             GatewaySecurityMiddleware,
             get_config=lambda: self.security_config,
         )
-        self.app.add_middleware(
-            GatewayObservabilityMiddleware,
-            metrics=self._metrics,
-        )
         self.app.add_route(
             "/summary",
             self.get_summary,
@@ -1176,5 +1172,9 @@ async def lifespan(app: Starlette):
         router._running = False
 
 
-app = Starlette(lifespan=lifespan)
-router = MCPRouter(app, CONFIG_PATH)
+_starlette_app = Starlette(lifespan=lifespan)
+router = MCPRouter(_starlette_app, CONFIG_PATH)
+# Observability must sit outside Starlette's built-in ServerErrorMiddleware so
+# framework-generated 500 responses retain request correlation and downstream
+# disconnect signals remain visible at the actual ASGI receive/send boundary.
+app = GatewayObservabilityMiddleware(_starlette_app, metrics=router._metrics)

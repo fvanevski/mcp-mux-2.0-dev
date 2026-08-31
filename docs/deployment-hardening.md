@@ -25,9 +25,9 @@ Prefer `argv` over `unsafe_shell_command`. Use explicit `cwd`, minimal environme
 
 ## Observability
 
-`/summary` provides endpoint descriptions and runtime/compatibility state. `/metrics` exposes operational counters and runtime state without request payloads or credentials. Structured request logs include request ID, endpoint, protocol revision, method, named capability, status, duration, bytes streamed, policy outcome, trace-context presence, and cancellation state.
+`/summary` provides endpoint descriptions and runtime/compatibility state. `/metrics` exposes operational counters and runtime state without request payloads or credentials. `stream_cancellations_total` counts confirmed downstream disconnects only after an HTTP response stream has started; generic task cancellation remains visible in the structured request record but does not inflate that stream-disconnect counter. Structured request logs include request ID, endpoint, protocol revision, method, named capability, status, duration, bytes streamed, policy outcome, trace-context presence, and cancellation state.
 
-Request IDs are returned as `X-Request-Id`. A caller-provided value is accepted only when it is a bounded token; otherwise the gateway creates one. Valid W3C version-00 trace context is propagated upstream but raw trace values are not logged.
+The observability wrapper is outside Starlette's built-in error middleware and watches the ASGI receive/send boundary. This preserves disconnect detection for both pre-2.4 `http.disconnect` handling and ASGI 2.4+ failed-send/`ClientDisconnect` handling, and ensures framework-generated HTTP 500 responses still receive the same request correlation. Request IDs are returned as `X-Request-Id`; a caller-provided value is accepted only when it is a bounded token, otherwise the gateway creates one. Valid W3C version-00 trace context is propagated upstream but raw trace values are not logged.
 
 ## Validation before deployment
 

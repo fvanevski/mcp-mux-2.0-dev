@@ -11,6 +11,8 @@ from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from starlette.requests import ClientDisconnect
+
 ASGIMessage = MutableMapping[str, Any]
 ASGIReceive = Callable[[], Awaitable[ASGIMessage]]
 ASGISend = Callable[[ASGIMessage], Awaitable[None]]
@@ -82,11 +84,26 @@ class GatewayObservabilityMiddleware:
         scope["mcp.request_id"] = request_id
         status_code = 500
         bytes_streamed = 0
+        response_started = False
         cancelled = False
+        downstream_disconnected = False
+
+        def mark_downstream_disconnect() -> None:
+            nonlocal cancelled, downstream_disconnected, status_code
+            cancelled = True
+            downstream_disconnected = True
+            status_code = 499
+
+        async def observed_receive() -> ASGIMessage:
+            message = await receive()
+            if message.get("type") == "http.disconnect":
+                mark_downstream_disconnect()
+            return message
 
         async def observed_send(message: ASGIMessage) -> None:
-            nonlocal status_code, bytes_streamed
+            nonlocal status_code, bytes_streamed, response_started
             message_type = message.get("type")
+            body_size = 0
             if message_type == "http.response.start":
                 status_code = int(message.get("status", 500))
                 raw_headers = list(message.get("headers", []))
@@ -96,19 +113,32 @@ class GatewayObservabilityMiddleware:
             elif message_type == "http.response.body":
                 body = message.get("body", b"")
                 if isinstance(body, (bytes, bytearray, memoryview)):
-                    bytes_streamed += len(body)
-            await send(message)
+                    body_size = len(body)
+            try:
+                await send(message)
+            except (ClientDisconnect, OSError):
+                mark_downstream_disconnect()
+                raise
+            else:
+                if message_type == "http.response.start":
+                    response_started = True
+                elif message_type == "http.response.body":
+                    bytes_streamed += body_size
 
         try:
-            await self.app(scope, receive, observed_send)
+            await self.app(scope, observed_receive, observed_send)
+        except ClientDisconnect:
+            mark_downstream_disconnect()
+            raise
         except asyncio.CancelledError:
             cancelled = True
             status_code = 499
-            endpoint = scope.get("mcp.endpoint")
-            if isinstance(endpoint, str) and endpoint:
-                self.metrics.record_stream_cancellation(endpoint)
             raise
         finally:
+            if downstream_disconnected and response_started:
+                endpoint = scope.get("mcp.endpoint")
+                if isinstance(endpoint, str) and endpoint:
+                    self.metrics.record_stream_cancellation(endpoint)
             duration_ms = round((time.perf_counter() - started) * 1000, 3)
             record = {
                 "event": "mcp_request",
