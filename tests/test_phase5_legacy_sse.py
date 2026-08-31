@@ -694,7 +694,8 @@ async def test_repeated_bridge_disconnect_and_hot_reload_leave_no_owned_work() -
         await assert_clean(reloaded_session, reloaded_upstream)
         assert old_runtime.state is RuntimeState.DRAINING
         assert router._runtimes["legacy"] is not old_runtime
-        await reloaded_iterator.aclose()
+        with pytest.raises(StopAsyncIteration):
+            await anext(reloaded_iterator)
 
     metrics = bridge.metrics_snapshot("legacy")
     assert metrics["sessions_opened_total"] == cycles * 2
