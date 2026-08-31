@@ -18,6 +18,7 @@ from starlette.responses import StreamingResponse
 
 from mcp_router.compat.legacy_sse import BridgeSession, LegacySSEBridge
 from mcp_router.core.config_loader import Endpoint, RouterConfig
+from mcp_router.core.runtime import RuntimeState
 from mcp_router.server import MCPRouter
 
 
