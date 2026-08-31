@@ -15,9 +15,20 @@ security:
   allowed_origins: []
 ```
 
-`local_only` requires a loopback immediate peer and validates the `Host` header against `allowed_hosts`. A present `Origin` is accepted when it is explicitly listed or when it is a structurally valid `http`/`https` loopback origin (`localhost` or a loopback IP, with any port and no credentials, query, or fragment); non-loopback Origins are rejected. This permits local browser clients and the official conformance fixture without broadening the network trust boundary. The command-line launcher also refuses a non-loopback `--host` while this mode is active. There is no wildcard credentialed CORS path. Do not place `local_only` behind an externally reachable reverse proxy: a same-host proxy is itself a loopback peer and therefore cannot preserve the local-only trust boundary. Any externally reachable or reverse-proxied deployment must use `authenticated` mode.
+`local_only` requires a loopback immediate peer and validates the `Host` header against `allowed_hosts`. A present `Origin` is accepted when it is explicitly listed or when it is a structurally valid `http`/`https` loopback origin (`localhost` or a loopback IP, with any port and no credentials, query, or fragment); non-loopback Origins are rejected. This permits local browser clients and the official conformance fixture without broadening the network trust boundary. The command-line launcher also refuses a non-loopback `--host` while this mode is active. There is no wildcard credentialed CORS path. Do not place `local_only` behind an externally reachable reverse proxy: a same-host proxy is itself a loopback peer and therefore cannot preserve the local-only trust boundary.
 
-Non-local binding requires `security.mode: authenticated` and at least one explicit authentication provider. Direct callers may authenticate with a gateway API key supplied as `Authorization: Bearer <key>`:
+`remote` permits non-loopback immediate peers and does not require a global mux API key or trusted-proxy identity. `allowed_hosts` remains mandatory and enforced, and any present `Origin` must still be explicitly listed in `allowed_origins`; an absent `Origin` remains acceptable. This mode is intentionally anonymous. Host and Origin allowlists are request-boundary controls, not authentication, and private/high-entropy endpoint paths are not equivalent to authentication. If consequential tools require stronger access control, add authentication at a controlled upstream/reverse-proxy boundary or use the mux's `authenticated` mode.
+
+```yaml
+security:
+  mode: remote
+  allowed_hosts: [127.0.0.1, localhost, "::1", mcp.example.test]
+  allowed_origins: []
+```
+
+A loopback-bound mux may use `remote` behind a TLS reverse proxy when the external Host is explicitly allowlisted. `remote` does not trust forwarded identity headers as caller identity and does not change upstream credential/header isolation.
+
+Non-local binding requires `security.mode: remote` or `security.mode: authenticated`. `authenticated` additionally requires at least one explicit authentication provider. Direct callers may authenticate with a gateway API key supplied as `Authorization: Bearer <key>`:
 
 ```yaml
 security:

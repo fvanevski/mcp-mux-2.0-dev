@@ -104,6 +104,23 @@ Configuration values support shell-style environment references before validatio
 - Empty `Authorization: "Bearer ${HF_TOKEN:-}"` values are omitted, allowing endpoints such as Hugging Face to fall back to anonymous access.
 - If `HF_TOKEN` is accidentally set to `Bearer hf_...`, the loader normalizes `Bearer Bearer hf_...` to `Bearer hf_...`.
 
+### Gateway Security Modes
+
+Gateway `security.mode` is separate from each endpoint's `mode`:
+
+- `local_only` (default) accepts only a loopback immediate peer and requires explicit allowed Hosts; local loopback Origins are accepted under the documented local policy.
+- `remote` permits non-loopback or reverse-proxied callers without a global mux API key. Host validation remains mandatory, and any present Origin must be explicitly allowlisted. An absent Origin remains acceptable.
+- `authenticated` permits non-loopback callers only through the existing gateway API-key and/or trusted-proxy identity boundary.
+
+`remote` is intentionally anonymous. `allowed_hosts` and `allowed_origins` are request-boundary controls, not authentication, and private/high-entropy endpoint paths should not be treated as strong authentication. For consequential deployments that require stronger access control, use `authenticated` mode or terminate authentication at a controlled reverse proxy. The mux may remain bound to `127.0.0.1` behind that proxy; include the external hostname in `allowed_hosts`.
+
+```yaml
+security:
+  mode: remote
+  allowed_hosts: [127.0.0.1, localhost, "::1", mcp.example.test]
+  allowed_origins: []
+```
+
 ### Configuration Parameters
 
 | Parameter | Type | Required | Description |

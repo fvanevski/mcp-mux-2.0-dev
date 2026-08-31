@@ -99,10 +99,11 @@ def fake_client_for(stream_context: MagicMock) -> tuple[httpx.AsyncClient, Magic
     return cast(httpx.AsyncClient, fake_client), fake_client
 
 
-def test_non_loopback_bind_requires_authenticated_mode() -> None:
+def test_non_loopback_bind_requires_explicit_remote_or_authenticated_mode() -> None:
     with pytest.raises(ValueError, match="Non-loopback binding"):
         validate_bind_security("0.0.0.0", SecurityConfig())
 
+    validate_bind_security("0.0.0.0", SecurityConfig(mode="remote"))
     validate_bind_security(
         "0.0.0.0",
         SecurityConfig(mode="authenticated", api_key="gateway-secret"),

@@ -69,6 +69,83 @@ async def test_local_only_rejects_non_loopback_origin() -> None:
 
 
 @pytest.mark.asyncio
+async def test_local_only_rejects_non_loopback_peer() -> None:
+    transport = httpx.ASGITransport(
+        app=_app(SecurityConfig()),
+        client=("203.0.113.9", 43123),
+    )
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://127.0.0.1:8012",
+    ) as client:
+        response = await client.get("/mcp")
+
+    assert response.status_code == 403
+    assert response.json() == {"error": "Local-only gateway access required"}
+
+
+@pytest.mark.asyncio
+async def test_remote_accepts_non_loopback_peer_without_global_auth() -> None:
+    security = SecurityConfig(
+        mode="remote",
+        allowed_hosts=["mcp.example.test"],
+        allowed_origins=[],
+    )
+    transport = httpx.ASGITransport(
+        app=_app(security),
+        client=("203.0.113.9", 43123),
+    )
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://mcp.example.test",
+    ) as client:
+        response = await client.get("/mcp")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_remote_enforces_host_and_origin_allowlists() -> None:
+    security = SecurityConfig(
+        mode="remote",
+        allowed_hosts=["mcp.example.test"],
+        allowed_origins=["https://agent.example.test"],
+    )
+    transport = httpx.ASGITransport(
+        app=_app(security),
+        client=("203.0.113.9", 43123),
+    )
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://mcp.example.test",
+    ) as client:
+        allowed = await client.get(
+            "/mcp",
+            headers={"Origin": "https://agent.example.test"},
+        )
+        invalid_origin = await client.get(
+            "/mcp",
+            headers={"Origin": "https://evil.example.test"},
+        )
+        invalid_host = await client.get(
+            "http://evil.example.test/mcp",
+            headers={"Origin": "https://agent.example.test"},
+        )
+
+    assert allowed.status_code == 200
+    assert invalid_origin.status_code == 403
+    assert invalid_origin.json() == {"error": "Invalid Origin"}
+    assert invalid_host.status_code == 403
+    assert invalid_host.json() == {"error": "Invalid Host"}
+
+
+def test_unknown_security_mode_is_rejected() -> None:
+    with pytest.raises(ValueError):
+        SecurityConfig(mode="anonymous")  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
 async def test_authenticated_mode_does_not_implicitly_allow_loopback_origin() -> None:
     security = SecurityConfig(
         mode="authenticated",

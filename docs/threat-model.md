@@ -22,7 +22,7 @@
 | Forged identity/proxy headers | Forwarded identity headers are removed unless the authenticated trusted-proxy boundary establishes identity. |
 | Capability bypass by direct call | Policy authorizes direct named operations before upstream dispatch; denied calls are counted. |
 | Forged modern routing headers | Modern `2026-07-28` body metadata and `MCP-Protocol-Version` / `Mcp-Method` / `Mcp-Name` agreement are validated before dispatch. |
-| Host/Origin exposure | Local-only mode requires loopback callers; non-loopback binding requires authenticated mode; allowed Host/Origin values are enforced. |
+| Host/Origin exposure | `local_only` requires loopback callers; explicit `remote` or `authenticated` mode is required for non-loopback binding; allowed Host/Origin values remain enforced in every mode. `remote` is anonymous, so those allowlists are boundary controls rather than caller authentication. |
 | Secret leakage in logs | Structured request logs contain operational metadata only, never raw request/response bodies or headers. Existing process/upstream error logging passes through the configured redactor. |
 | Trace metadata abuse | Only W3C version-00 `traceparent` values using the normative lowercase-hex grammar and nonzero trace/parent IDs are forwarded with bounded `tracestate`; invalid trace context and arbitrary caller `baggage` are dropped. Trace values are not logged. |
 | Unbounded stream/session work | Runtime leases, bridge queue/session limits, TTL/backpressure policy, cancellation cleanup, and endpoint retirement bound work. Downstream stream disconnects are detected at the outer ASGI receive/send boundary so pre-2.4 `http.disconnect` and ASGI 2.4+ failed-send semantics both drive cancellation state and exactly-once stream-disconnect accounting only while the response stream is active. |
@@ -36,6 +36,7 @@
 - Legacy HTTP+SSE and the local legacy SSE bridge remain compatibility surfaces and therefore retain additional state/lifecycle complexity. They are deprecated, opt-in where applicable, bounded, and observable.
 - `unsafe_shell_command` intentionally permits shell semantics for explicitly configured managed endpoints. Treat configuration write access as privileged code-execution authority.
 - The gateway cannot make an untrusted upstream safe. Upstream responses are subject to header sanitization, redaction/projection where applicable, but upstream application semantics remain outside mux authority.
+- `remote` mode intentionally permits unauthenticated callers. Host/Origin allowlists and private/high-entropy endpoint paths do not establish strong caller identity; consequential deployments that need stronger access control should add authentication at a controlled reverse-proxy/upstream boundary or use `authenticated` mode.
 - In-process metrics reset on process restart; they are operational counters, not durable audit records. `stream_cancellations_total` is intentionally narrower than generic task cancellation and counts only confirmed downstream disconnects after response start and before terminal response completion.
 
 ## Security regression authority
