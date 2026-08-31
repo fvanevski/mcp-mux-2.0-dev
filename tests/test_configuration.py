@@ -78,6 +78,23 @@ def test_config_duplicate_path():
         RouterConfig.model_validate(data)
 
 
+@pytest.mark.parametrize("path", ["summary", "SUMMARY", "metrics", "MeTrIcS"])
+def test_reserved_operational_route_names_are_rejected(path: str) -> None:
+    with pytest.raises(ValueError, match="is reserved"):
+        RouterConfig.model_validate(
+            {
+                "endpoints": [
+                    {
+                        "path": path,
+                        "mode": "remote",
+                        "url": "https://example.test/mcp",
+                        "summary": "Reserved namespace fixture",
+                    }
+                ]
+            }
+        )
+
+
 def test_config_missing_remote_url():
     with pytest.raises(ValueError):
         RouterConfig.model_validate(

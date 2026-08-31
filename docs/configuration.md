@@ -47,7 +47,7 @@ Browser origins remain exact allowlist entries even in authenticated mode. A val
 
 Every endpoint requires:
 
-- `path`: one route namespace matching `[A-Za-z0-9][A-Za-z0-9._-]*`. `summary` is reserved case-insensitively and `/` is forbidden.
+- `path`: one route namespace matching `[A-Za-z0-9][A-Za-z0-9._-]*`. `summary` and `metrics` are reserved case-insensitively for the gateway-owned `/summary` and `/metrics` operational routes, and `/` is forbidden.
 - `mode`: `remote` or `managed_cli`.
 - `url`: an absolute `http` or `https` URL.
 - `summary`: a non-empty operator-facing description.
@@ -86,7 +86,7 @@ tool_limits:
     requests_per_minute: 30
 ```
 
-An exceeded limit is rejected locally before managed-process activation or upstream dispatch. Streaming responses hold their endpoint concurrency and runtime-work leases until the downstream stream closes. Teardown is exception-safe: if closing the upstream iterator or HTTP stream context itself fails, that close exception still propagates but runtime and limiter ownership are released unconditionally, so retirement/idle shutdown cannot remain pinned by failed stream cleanup. Buffered upstream read failures likewise release acquired concurrency ownership before the exception propagates. Rate windows are one minute and are scoped independently per endpoint and configured tool.
+An exceeded limit is rejected locally before managed-process activation or upstream dispatch. Streaming responses hold their endpoint concurrency and runtime-work leases until the downstream stream closes. Teardown is exception-safe: if closing the upstream iterator or HTTP stream context itself fails, that close exception still propagates but runtime and limiter ownership are released unconditionally, so retirement/idle shutdown cannot remain pinned by failed stream cleanup. Buffered upstream read failures are contained as generated gateway 502 responses before any buffered body is forwarded; upstream context and limiter/runtime leases are released and the upstream failure is recorded rather than propagating a raw transport exception. Rate windows are one minute and are scoped independently per endpoint and configured tool.
 
 ### Deprecated local SSE compatibility adapter
 

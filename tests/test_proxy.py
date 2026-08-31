@@ -39,6 +39,31 @@ async def test_summary_route():
 
 
 @pytest.mark.asyncio
+async def test_operational_routes_remain_gateway_owned() -> None:
+    router._configs = {
+        "weather": EndpointConfig(
+            path="weather",
+            mode="remote",
+            url="http://weather/mcp",
+            summary="Weather summary",
+        )
+    }
+    async with AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://localhost",
+    ) as client:
+        with patch("httpx.AsyncClient.stream") as upstream:
+            summary = await client.get("/summary")
+            metrics = await client.get("/metrics")
+
+    assert summary.status_code == 200
+    assert metrics.status_code == 200
+    assert summary.json()["endpoints"][0]["path"] == "weather"
+    assert metrics.json()["endpoints"][0]["path"] == "weather"
+    upstream.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_not_found_route():
     async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
         response = await client.get("/nonexistent")

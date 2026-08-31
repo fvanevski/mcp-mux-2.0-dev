@@ -18,7 +18,7 @@
 - 🛡️ **Session Propagation & Isolation**: For explicitly enabled legacy bridge sessions, maps upstream `Mcp-Session-Id` values to endpoint-owned local sessions, rejects cross-endpoint reuse, and deterministically cleans up expired/disconnected sessions and owned upstream work.
 - 🤝 **Strict Streamable HTTP Compatibility**: Normalizes required upstream transport headers, rejects malformed JSON-RPC and modern protocol/header mismatches rather than repairing invalid request bodies, and contains invalid-UTF-8, syntactically malformed, or non-standard-constant upstream JSON responses as gateway errors instead of repairing or forwarding invalid MCP payloads. Post-header upstream read failures are also counted and contained before forwarding when the response is still bufferable.
 - 🧼 **Decoded Response Header Safety**: Strips stale `Content-Encoding` and upstream `Content-Length` headers when the router reads and rebuilds JSON responses.
-- 📊 **Operational Visibility**: `/summary` exposes endpoint descriptions plus runtime/counter state, while `/metrics` provides focused endpoint state, lease, restart, cancellation, policy-denial, upstream-error, and legacy-bridge counters.
+- 📊 **Operational Visibility**: `/summary` exposes endpoint descriptions plus runtime/counter state, while `/metrics` provides focused endpoint state, lease, restart, cancellation, policy-denial, upstream-error, and legacy-bridge counters. The `summary` and `metrics` endpoint namespaces are reserved for these gateway-owned routes.
 - 🔎 **Structured Request Diagnostics**: Payload-free JSON logs include request ID, endpoint, protocol revision, method, named capability, result status, duration, bytes streamed, policy outcome, and cancellation state. `X-Request-Id` is returned downstream and supported W3C trace context is propagated upstream without logging raw trace values.
 - 🧹 **Clean Subprocess Lifecycle**: The manager isolates background subprocesses inside unique Unix process groups (`os.setsid`) to guarantee no zombie processes are left behind on teardown.
 
@@ -108,7 +108,7 @@ Configuration values support shell-style environment references before validatio
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `path` | String | Yes | Unique namespace/route for the sub-server. |
+| `path` | String | Yes | Unique namespace/route for the sub-server. `summary` and `metrics` are reserved case-insensitively for gateway-owned operational routes. |
 | `mode` | String | Yes | Spawning mode. `remote` and `managed_cli` are currently handled by the router. |
 | `url` | String | Yes (for remote/managed) | Target endpoint URL. |
 | `argv` | List of Strings | One of `argv` / `unsafe_shell_command` (managed) | Preferred managed-process command; executed directly without a shell. |
