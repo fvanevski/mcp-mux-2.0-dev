@@ -223,7 +223,7 @@ def _bearer_token(value: str | None) -> str | None:
 
 
 class GatewaySecurityMiddleware:
-    """Authenticate the caller and validate HTTP exposure before endpoint routing."""
+    """Enforce caller access and validate HTTP exposure before endpoint routing."""
 
     def __init__(
         self,
