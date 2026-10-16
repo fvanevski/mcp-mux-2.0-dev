@@ -63,11 +63,41 @@ Every endpoint requires:
 - `url`: an absolute `http` or `https` URL.
 - `summary`: a non-empty operator-facing description.
 
-Optional common fields are `timeout`, `upstream_timeout`, `transport`, `legacy_sse_bridge`, `headers`, `inbound_headers`, capability-policy lists, `limits`, and `tool_limits`. `timeout` is the managed-endpoint inactivity timeout measured from completion of the last real upstream-work lease; an idle local compatibility SSE connection does not refresh it. `upstream_timeout` defaults to 60 seconds and bounds upstream request establishment plus finite response consumption: connect/write/pool operations remain bounded, response headers must arrive within the configured budget, complete JSON responses must finish within that budget, and non-SSE streamed responses retain a per-chunk idle bound. Event-stream responses deliberately have no read-idle timeout because both modern Streamable HTTP and explicit legacy HTTP+SSE may remain valid while quiet; downstream cancellation still closes the corresponding upstream response context. Both configuration values must be positive. `transport`, when explicit, is `sse` or `streamable-http`; otherwise it is inferred from the URL. `legacy_sse_bridge` is an explicit bounded configuration mapping valid only for `streamable-http` endpoints; omission disables the adapter and the former boolean form is rejected.
+Optional common fields are `timeout`, `upstream_timeout`, `transport`, `legacy_sse_bridge`, `allow_headerless_legacy`, `headers`, `inbound_headers`, capability-policy lists, `limits`, and `tool_limits`. `timeout` is the managed-endpoint inactivity timeout measured from completion of the last real upstream-work lease; an idle local compatibility SSE connection does not refresh it. `upstream_timeout` defaults to 60 seconds and bounds upstream request establishment plus finite response consumption: connect/write/pool operations remain bounded, response headers must arrive within the configured budget, complete JSON responses must finish within that budget, and non-SSE streamed responses retain a per-chunk idle bound. Event-stream responses deliberately have no read-idle timeout because both modern Streamable HTTP and explicit legacy HTTP+SSE may remain valid while quiet; downstream cancellation still closes the corresponding upstream response context. Both configuration values must be positive. `transport`, when explicit, is `sse` or `streamable-http`; otherwise it is inferred from the URL. `legacy_sse_bridge` is an explicit bounded configuration mapping valid only for `streamable-http` endpoints; omission disables the adapter and the former boolean form is rejected.
 
 Capability policy supports mutually exclusive allow/deny pairs for methods, tools, resources, and prompts: `allowed_methods`/`denied_methods`, `allowed_tools`/`denied_tools`, `allowed_resources`/`denied_resources`, and `allowed_prompts`/`denied_prompts`. Names must be non-empty and unique. Supplying both halves of any pair is a configuration error; the loader no longer silently discards a denylist. The same policy evaluator authorizes direct calls and projects discovery results, so a capability omitted from discovery cannot still be invoked by name. Resource policy covers `resources/read`, legacy `resources/subscribe`/`resources/unsubscribe`, and every URI requested through modern `subscriptions/listen` `notifications.resourceSubscriptions`; a listen request that asks only for list-change notifications is evaluated only against method policy. Modern requests reach policy only after Phase-2 header/body validation; supported legacy requests use the parsed JSON-RPC body as the policy source.
 
 Configuration models reject unknown fields. Environment references are expanded before model validation using `${NAME}` for required values or `${NAME:-fallback}` for a default.
+
+### Opt-in compatibility for older headerless legacy clients
+
+Some handshake-era Kotlin MCP SDKs send `Mcp-Method` (and `Mcp-Name` for named calls)
+but never send `MCP-Protocol-Version`, even after a successful `initialize`. Such clients
+can be misclassified as modern on `notifications/initialized`, `tools/list`, and `tools/call`.
+For a known compatible Streamable HTTP upstream, enable this **per endpoint**:
+
+```yaml
+- path: firecrawl
+  mode: managed_cli
+  # Existing managed execution, readiness, URL, and security fields are unchanged.
+  allow_headerless_legacy: true
+```
+
+The option defaults to `false` and is invalid on `transport: sse` endpoints. When
+enabled, a request with no `MCP-Protocol-Version` header and no modern-protocol
+metadata may be classified as legacy if `Mcp-Method` exactly matches the JSON-RPC
+body method. An explicit modern protocol version or modern-specific `_meta`
+fields still require strict modern validation, including the required header and
+capability fields. The request body and headers are **not** rewritten.
+
+**Tradeoff:** a headerless modern request that lacks both its version header and
+modern `_meta` but supplies a matching `Mcp-Method` is indistinguishable on the
+wire from this older legacy client. On an opted-in endpoint it is treated as legacy
+and passed to the upstream/policy layer, rather than rejected as malformed modern
+traffic at the mux boundary. Keep the option off by default, enable it only on
+known legacy-compatible endpoints, and do not use it as a general modern-protocol
+validation workaround. This flag is distinct from `legacy_sse_bridge`; no SSE
+adapter or mux-local session is created.
 
 ### Caller headers versus upstream headers
 
