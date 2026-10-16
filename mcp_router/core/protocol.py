@@ -9,6 +9,14 @@ from enum import StrEnum
 from typing import Any
 
 MODERN_PROTOCOL_VERSION = "2026-07-28"
+# Published handshake-based MCP revisions. These may carry modern-looking routing
+# headers from older clients without using the request-scoped protocol envelope.
+LEGACY_PROTOCOL_VERSIONS = frozenset({
+    "2024-11-05",
+    "2025-03-26",
+    "2025-06-18",
+    "2025-11-25",
+})
 PROTOCOL_VERSION_META = "io.modelcontextprotocol/protocolVersion"
 CLIENT_CAPABILITIES_META = "io.modelcontextprotocol/clientCapabilities"
 
@@ -146,6 +154,22 @@ def classify_protocol_era(
     protocol_header = _header(headers, "MCP-Protocol-Version")
     if protocol_header == MODERN_PROTOCOL_VERSION:
         return ProtocolEra.MODERN
+
+    # Some handshake-era clients also emit Mcp-Method/Mcp-Name. Explicit legacy
+    # protocol evidence takes precedence over those otherwise modern-only headers.
+    if protocol_header in LEGACY_PROTOCOL_VERSIONS:
+        return ProtocolEra.LEGACY
+    proposed_version = request.params.get("protocolVersion")
+    if (
+        protocol_header is None
+        and request.method == "initialize"
+        and isinstance(proposed_version, str)
+        and proposed_version in LEGACY_PROTOCOL_VERSIONS
+    ):
+        return ProtocolEra.LEGACY
+
+    # Ambiguous requests with routing headers and no legacy evidence remain
+    # modern, so malformed modern requests cannot silently downgrade.
     if _header(headers, "Mcp-Method") is not None or _header(headers, "Mcp-Name") is not None:
         return ProtocolEra.MODERN
     return ProtocolEra.LEGACY

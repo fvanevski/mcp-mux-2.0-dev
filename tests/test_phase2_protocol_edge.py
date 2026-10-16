@@ -19,6 +19,7 @@ from mcp_router.core.protocol import (
     HEADER_MISMATCH,
     INVALID_PARAMS,
     INVALID_REQUEST,
+    LEGACY_PROTOCOL_VERSIONS,
     MODERN_PROTOCOL_VERSION,
     PARSE_ERROR,
     PROTOCOL_VERSION_META,
@@ -83,6 +84,68 @@ def test_parse_rejects_non_json_numeric_constants(constant: str):
     with pytest.raises(ProtocolRequestError) as invalid_constant:
         parse_jsonrpc_request(body)
     assert invalid_constant.value.code == PARSE_ERROR
+
+
+@pytest.mark.parametrize(
+    ("method", "params", "headers"),
+    [
+        (
+            "initialize",
+            {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}},
+            {"Mcp-Method": "initialize"},
+        ),
+        (
+            "initialize",
+            {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}},
+            {"MCP-Protocol-Version": "2025-11-25", "Mcp-Method": "initialize"},
+        ),
+        (
+            "tools/list",
+            {},
+            {"MCP-Protocol-Version": "2025-11-25", "Mcp-Method": "tools/list"},
+        ),
+    ],
+)
+def test_explicit_legacy_era_not_overridden_by_routing_headers(
+    method: str,
+    params: dict[str, Any],
+    headers: dict[str, str],
+):
+    request = parse_jsonrpc_request(
+        json.dumps({"jsonrpc": "2.0", "id": 37, "method": method, "params": params}).encode()
+    )
+    assert validate_protocol_request(request, headers) is ProtocolEra.LEGACY
+
+
+@pytest.mark.parametrize("version", sorted(LEGACY_PROTOCOL_VERSIONS))
+def test_all_published_legacy_revisions_allow_advisory_method_header(version: str):
+    request = parse_jsonrpc_request(
+        b'{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+    )
+    assert validate_protocol_request(
+        request, {"MCP-Protocol-Version": version, "Mcp-Method": "tools/list"}
+    ) is ProtocolEra.LEGACY
+
+
+def test_legacy_markers_do_not_downgrade_modern_or_ambiguous_requests():
+    request = parse_jsonrpc_request(json.dumps(modern_body()).encode())
+    with pytest.raises(ProtocolRequestError) as contradictory:
+        validate_protocol_request(
+            request,
+            {"MCP-Protocol-Version": "2025-11-25", "Mcp-Method": "tools/list"},
+        )
+    assert contradictory.value.code == HEADER_MISMATCH
+
+    missing_meta = parse_jsonrpc_request(
+        b'{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+    )
+    for headers in (
+        {"MCP-Protocol-Version": MODERN_PROTOCOL_VERSION, "Mcp-Method": "tools/list"},
+        {"Mcp-Method": "tools/list"},
+    ):
+        with pytest.raises(ProtocolRequestError) as unclassified:
+            validate_protocol_request(missing_meta, headers)
+        assert unclassified.value.code == INVALID_PARAMS
 
 
 def test_protocol_validation_preserves_legacy_and_enforces_modern_headers():

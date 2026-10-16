@@ -400,7 +400,7 @@ async def test_legacy_sessionful_streamable_http_baseline():
                         "clientInfo": {"name": "phase0-legacy-client", "version": "1"},
                     },
                 },
-                headers={"Accept": "application/json"},
+                headers={"Accept": "application/json", "Mcp-Method": "initialize"},
             )
             session_id = initialize.headers["mcp-session-id"]
             tools = await client.post(
@@ -408,6 +408,8 @@ async def test_legacy_sessionful_streamable_http_baseline():
                 json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
                 headers={
                     "Accept": "application/json",
+                    "MCP-Protocol-Version": "2025-11-25",
+                    "Mcp-Method": "tools/list",
                     "Mcp-Session-Id": session_id,
                 },
             )
@@ -418,6 +420,9 @@ async def test_legacy_sessionful_streamable_http_baseline():
     assert tools.json()["result"]["tools"][0]["name"] == "legacy_tool"
     assert router._legacy_bridge is None
     assert upstream.requests[1].headers["mcp-session-id"] == upstream.legacy_session_id
+    assert upstream.requests[0].headers["mcp-method"] == "initialize"
+    assert upstream.requests[1].headers["mcp-method"] == "tools/list"
+    assert upstream.requests[1].headers["mcp-protocol-version"] == "2025-11-25"
 
 
 @pytest.mark.asyncio
