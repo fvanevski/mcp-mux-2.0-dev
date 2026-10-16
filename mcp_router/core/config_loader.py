@@ -270,6 +270,7 @@ class EndpointBase(BaseModel):
     upstream_timeout: float = Field(default=60.0, gt=0)
     transport: Literal["sse", "streamable-http"] | None = None
     legacy_sse_bridge: LegacySSEBridgeConfig | None = None
+    allow_headerless_legacy: bool = False
     allowed_methods: list[str] | None = None
     denied_methods: list[str] | None = None
     allowed_tools: list[str] | None = None
@@ -406,6 +407,8 @@ class EndpointBase(BaseModel):
 
         if self.legacy_sse_bridge is not None and self.transport != "streamable-http":
             raise ValueError("legacy_sse_bridge requires transport 'streamable-http'")
+        if self.allow_headerless_legacy and self.transport != "streamable-http":
+            raise ValueError("allow_headerless_legacy requires transport 'streamable-http'")
         return self
 
 
