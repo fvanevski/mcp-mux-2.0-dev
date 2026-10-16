@@ -147,6 +147,8 @@ def parse_jsonrpc_request(body: bytes) -> ParsedJSONRPCRequest:
 def classify_protocol_era(
     request: ParsedJSONRPCRequest,
     headers: Mapping[str, str],
+    *,
+    allow_headerless_legacy: bool = False,
 ) -> ProtocolEra:
     meta = request.params.get("_meta")
     if isinstance(meta, dict) and PROTOCOL_VERSION_META in meta:
@@ -168,9 +170,18 @@ def classify_protocol_era(
     ):
         return ProtocolEra.LEGACY
 
+    # Older handshake-era SDKs can send Mcp-Method on every POST while never
+    # setting MCP-Protocol-Version, even after initialize. Explicitly opted-in
+    # endpoints accept this legacy envelope only when its routing method agrees
+    # with the body and neither modern version signal is present. Headerless
+    # modern-looking traffic remains strict on endpoints without this option.
+    method_header = _header(headers, "Mcp-Method")
+    if allow_headerless_legacy and protocol_header is None and method_header == request.method:
+        return ProtocolEra.LEGACY
+
     # Ambiguous requests with routing headers and no legacy evidence remain
-    # modern, so malformed modern requests cannot silently downgrade.
-    if _header(headers, "Mcp-Method") is not None or _header(headers, "Mcp-Name") is not None:
+    # modern, so malformed modern requests cannot silently downgrade by default.
+    if method_header is not None or _header(headers, "Mcp-Name") is not None:
         return ProtocolEra.MODERN
     return ProtocolEra.LEGACY
 
@@ -178,8 +189,14 @@ def classify_protocol_era(
 def validate_protocol_request(
     request: ParsedJSONRPCRequest,
     headers: Mapping[str, str],
+    *,
+    allow_headerless_legacy: bool = False,
 ) -> ProtocolEra:
-    era = classify_protocol_era(request, headers)
+    era = classify_protocol_era(
+        request,
+        headers,
+        allow_headerless_legacy=allow_headerless_legacy,
+    )
     if era is ProtocolEra.LEGACY:
         return era
 
