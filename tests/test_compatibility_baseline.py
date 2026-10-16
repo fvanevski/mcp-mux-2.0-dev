@@ -426,6 +426,118 @@ async def test_legacy_sessionful_streamable_http_baseline():
 
 
 @pytest.mark.asyncio
+async def test_headerless_legacy_sdk_full_connect_and_call_sequence():
+    """An older Kotlin SDK adds Mcp-Method but never sets MCP-Protocol-Version."""
+    router._configs = {
+        "legacy-compat": EndpointConfig(
+            path="legacy-compat",
+            mode="remote",
+            url="http://mock-upstream.local/mcp",
+            summary="Legacy Kotlin compatibility",
+            transport="streamable-http",
+            allow_headerless_legacy=True,
+        )
+    }
+    upstream = MockMCPUpstream("legacy-sessionful")
+    inbound = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=inbound, base_url="http://localhost") as client:
+        with patch("mcp_router.server.httpx.AsyncClient", side_effect=_outbound_client_factory(upstream)):
+            initialize = await client.post(
+                "/legacy-compat",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-11-25",
+                        "capabilities": {},
+                        "clientInfo": {"name": "rikka-old-sdk", "version": "1"},
+                    },
+                },
+                headers={"Mcp-Method": "initialize"},
+            )
+            assert initialize.status_code == 200
+            session_id = initialize.headers["mcp-session-id"]
+            session_headers = {"Mcp-Session-Id": session_id}
+
+            initialized = await client.post(
+                "/legacy-compat",
+                json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+                headers={**session_headers, "Mcp-Method": "notifications/initialized"},
+            )
+            tools = await client.post(
+                "/legacy-compat",
+                json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+                headers={**session_headers, "Mcp-Method": "tools/list"},
+            )
+            called = await client.post(
+                "/legacy-compat",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {"name": "legacy_tool", "arguments": {}},
+                },
+                headers={
+                    **session_headers,
+                    "Mcp-Method": "tools/call",
+                    "Mcp-Name": "legacy_tool",
+                },
+            )
+
+    assert initialized.status_code == 202
+    assert tools.status_code == 200
+    assert tools.json()["result"]["tools"][0]["name"] == "legacy_tool"
+    assert called.status_code == 200
+    assert called.json()["result"]["echoMethod"] == "tools/call"
+    assert len(upstream.requests) == 4
+    assert [item.json_body["method"] for item in upstream.requests] == [
+        "initialize",
+        "notifications/initialized",
+        "tools/list",
+        "tools/call",
+    ]
+    assert all("mcp-protocol-version" not in item.headers for item in upstream.requests)
+    assert all(item.headers.get("mcp-method") == item.json_body["method"] for item in upstream.requests)
+
+
+@pytest.mark.asyncio
+async def test_headerless_legacy_opt_in_retains_modern_validation_at_http_edge():
+    router._configs = {
+        "legacy-compat": EndpointConfig(
+            path="legacy-compat",
+            mode="remote",
+            url="http://mock-upstream.local/mcp",
+            summary="Legacy compatibility with modern validation",
+            transport="streamable-http",
+            allow_headerless_legacy=True,
+        )
+    }
+    upstream = MockMCPUpstream("modern-stateless")
+    inbound = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=inbound, base_url="http://localhost") as client:
+        with patch("mcp_router.server.httpx.AsyncClient", side_effect=_outbound_client_factory(upstream)):
+            invalid = await client.post(
+                "/legacy-compat",
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+                headers={"MCP-Protocol-Version": MODERN_PROTOCOL_VERSION, "Mcp-Method": "tools/list"},
+            )
+            valid = await client.post(
+                "/legacy-compat",
+                json=_modern_request(2, "tools/list"),
+                headers={"MCP-Protocol-Version": MODERN_PROTOCOL_VERSION, "Mcp-Method": "tools/list"},
+            )
+
+    assert invalid.status_code == 400
+    assert invalid.json()["error"]["code"] == -32602
+    assert valid.status_code == 200
+    assert valid.json()["result"]["resultType"] == "complete"
+    assert len(upstream.requests) == 1
+
+
+@pytest.mark.asyncio
 async def test_legacy_http_sse_baseline():
     router._configs = {
         "legacy-sse": EndpointConfig(
