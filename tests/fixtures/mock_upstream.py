@@ -293,6 +293,9 @@ class MockMCPUpstream:
         if headers.get("mcp-session-id") != self.legacy_session_id:
             return self._json_response({"error": "legacy session id required"}, status_code=400)
 
+        if method == "notifications/initialized" and "id" not in json_body:
+            return httpx.Response(202)
+
         if method == "tools/list":
             result = {
                 "tools": [
