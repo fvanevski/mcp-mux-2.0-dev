@@ -465,6 +465,8 @@ class MCPRouter:
     async def _read_post_body(
         self,
         request: Request,
+        *,
+        allow_headerless_legacy: bool = False,
     ) -> tuple[bytes, ParsedJSONRPCRequest, ProtocolEra] | JSONResponse:
         if not _is_json_content_type(request.headers.get("content-type")):
             return _transport_error_response(
@@ -509,7 +511,11 @@ class MCPRouter:
 
         try:
             parsed = parse_jsonrpc_request(body)
-            era = validate_protocol_request(parsed, request.headers)
+            era = validate_protocol_request(
+                parsed,
+                request.headers,
+                allow_headerless_legacy=allow_headerless_legacy,
+            )
         except ProtocolRequestError as exc:
             return _jsonrpc_error_response(exc)
         return body, parsed, era
@@ -900,7 +906,10 @@ class MCPRouter:
         parsed_request: ParsedJSONRPCRequest | None = None
         request_era = ProtocolEra.LEGACY
         if request.method == "POST":
-            body_result = await self._read_post_body(request)
+            body_result = await self._read_post_body(
+                request,
+                allow_headerless_legacy=endpoint.allow_headerless_legacy,
+            )
             if isinstance(body_result, JSONResponse):
                 return body_result
             request_body, parsed_request, request_era = body_result

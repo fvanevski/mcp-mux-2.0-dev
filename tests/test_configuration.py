@@ -34,6 +34,27 @@ def test_valid_config():
     assert cfg.endpoints[1].url == "http://localhost:8011/mcp"
 
 
+def test_headerless_legacy_compatibility_is_opt_in_and_streamable_only():
+    common = {
+        "path": "compat",
+        "mode": "remote",
+        "url": "https://upstream.test/mcp",
+        "summary": "Legacy SDK compatibility",
+    }
+    default = RouterConfig.model_validate({"endpoints": [common]})
+    assert default.endpoints[0].allow_headerless_legacy is False
+
+    enabled = RouterConfig.model_validate(
+        {"endpoints": [{**common, "allow_headerless_legacy": True}]}
+    )
+    assert enabled.endpoints[0].allow_headerless_legacy is True
+
+    with pytest.raises(ValueError, match="allow_headerless_legacy requires transport"):
+        RouterConfig.model_validate(
+            {"endpoints": [{**common, "transport": "sse", "allow_headerless_legacy": True}]}
+        )
+
+
 def test_config_port_collision():
     data = {
         "endpoints": [
