@@ -151,7 +151,16 @@ def classify_protocol_era(
     allow_headerless_legacy: bool = False,
 ) -> ProtocolEra:
     meta = request.params.get("_meta")
-    if isinstance(meta, dict) and PROTOCOL_VERSION_META in meta:
+    # A modern-only metadata field is positive modern protocol evidence even
+    # when another required modern metadata field is missing.
+    if isinstance(meta, dict) and any(
+        key in meta
+        for key in (
+            PROTOCOL_VERSION_META,
+            CLIENT_CAPABILITIES_META,
+            "io.modelcontextprotocol/clientInfo",
+        )
+    ):
         return ProtocolEra.MODERN
     protocol_header = _header(headers, "MCP-Protocol-Version")
     if protocol_header == MODERN_PROTOCOL_VERSION:
