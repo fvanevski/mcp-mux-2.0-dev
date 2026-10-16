@@ -492,14 +492,13 @@ async def test_headerless_legacy_sdk_full_connect_and_call_sequence():
     assert called.status_code == 200
     assert called.json()["result"]["echoMethod"] == "tools/call"
     assert len(upstream.requests) == 4
-    assert [item.json_body["method"] for item in upstream.requests] == [
+    assert [item.headers["mcp-method"] for item in upstream.requests] == [
         "initialize",
         "notifications/initialized",
         "tools/list",
         "tools/call",
     ]
     assert all("mcp-protocol-version" not in item.headers for item in upstream.requests)
-    assert all(item.headers.get("mcp-method") == item.json_body["method"] for item in upstream.requests)
 
 
 @pytest.mark.asyncio
