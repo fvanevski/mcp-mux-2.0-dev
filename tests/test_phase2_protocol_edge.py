@@ -148,6 +148,81 @@ def test_legacy_markers_do_not_downgrade_modern_or_ambiguous_requests():
         assert unclassified.value.code == INVALID_PARAMS
 
 
+@pytest.mark.parametrize(
+    ("method", "params", "request_id", "headers"),
+    [
+        ("notifications/initialized", {}, None, {"Mcp-Method": "notifications/initialized"}),
+        ("tools/list", {}, 2, {"Mcp-Method": "tools/list"}),
+        (
+            "tools/call",
+            {"name": "firecrawl_search", "arguments": {"query": "test"}},
+            3,
+            {"Mcp-Method": "tools/call", "Mcp-Name": "firecrawl_search"},
+        ),
+        (
+            "tools/call",
+            {"name": "firecrawl_search", "_meta": {"progressToken": 1}},
+            4,
+            {"Mcp-Method": "tools/call", "Mcp-Name": "firecrawl_search"},
+        ),
+    ],
+)
+def test_headerless_legacy_sdk_routing_headers_require_endpoint_opt_in(
+    method: str, params: dict[str, Any], request_id: int | None, headers: dict[str, str],
+):
+    payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method, "params": params}
+    if request_id is not None:
+        payload["id"] = request_id
+    request = parse_jsonrpc_request(json.dumps(payload).encode())
+
+    with pytest.raises(ProtocolRequestError) as rejected:
+        validate_protocol_request(request, headers)
+    assert rejected.value.code == INVALID_PARAMS
+
+    assert validate_protocol_request(
+        request,
+        headers,
+        allow_headerless_legacy=True,
+    ) is ProtocolEra.LEGACY
+
+
+def test_headerless_legacy_opt_in_never_overrides_positive_modern_evidence():
+    request = parse_jsonrpc_request(
+        b'{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}'
+    )
+    for headers in (
+        {"MCP-Protocol-Version": MODERN_PROTOCOL_VERSION, "Mcp-Method": "tools/list"},
+        {"MCP-Protocol-Version": "2099-01-01", "Mcp-Method": "tools/list"},
+        {"Mcp-Method": "prompts/list"},
+    ):
+        with pytest.raises(ProtocolRequestError) as rejected:
+            validate_protocol_request(request, headers, allow_headerless_legacy=True)
+        assert rejected.value.code == INVALID_PARAMS
+
+    for modern_meta in (
+        {PROTOCOL_VERSION_META: MODERN_PROTOCOL_VERSION},
+        {CLIENT_CAPABILITIES_META: {}},
+        {"io.modelcontextprotocol/clientInfo": {"name": "test", "version": "1"}},
+    ):
+        modern = parse_jsonrpc_request(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "tools/list",
+                    "params": {"_meta": modern_meta},
+                }
+            ).encode()
+        )
+        with pytest.raises(ProtocolRequestError) as rejected:
+            validate_protocol_request(
+                modern,
+                {"Mcp-Method": "tools/list"},
+                allow_headerless_legacy=True,
+            )
+        assert rejected.value.code in {INVALID_PARAMS, HEADER_MISMATCH}
+
+
 def test_protocol_validation_preserves_legacy_and_enforces_modern_headers():
     legacy = parse_jsonrpc_request(
         b'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}'
