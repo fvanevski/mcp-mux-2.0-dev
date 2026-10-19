@@ -85,6 +85,7 @@ class ProcessManager:
         subprocess_env.update(endpoint_cfg.env)
         start_new_session = os.name == "posix"
 
+        proc: asyncio.subprocess.Process | None = None
         try:
             if endpoint_cfg.argv is not None:
                 logger.info(
@@ -168,6 +169,8 @@ class ProcessManager:
             await self._terminate_locked(runtime, final_state=RuntimeState.STOPPED)
             raise
         except (OSError, RuntimeError, TimeoutError, ValueError, httpx.HTTPError) as exc:
+            if proc is not None and proc.returncode is not None:
+                runtime.last_exit_code = proc.returncode
             runtime.failure_reason = self._redact(str(exc))
             logger.error(
                 "Failed to launch managed endpoint '%s': %s",
@@ -175,6 +178,7 @@ class ProcessManager:
                 runtime.failure_reason,
             )
             await self._terminate_locked(runtime, final_state=RuntimeState.FAILED)
+            self._schedule_restart_if_allowed(runtime)
             raise
 
     async def drain_and_stop(
@@ -506,20 +510,22 @@ class ProcessManager:
         timeout: float,
     ) -> bool:
         try:
-            async with asyncio.timeout(timeout):
-                async with httpx.AsyncClient(
+            async with (
+                asyncio.timeout(timeout),
+                httpx.AsyncClient(
                     timeout=httpx.Timeout(timeout),
                     follow_redirects=False,
-                ) as client:
-                    async with client.stream(
-                        "POST",
-                        url,
-                        json=payload,
-                        headers=headers,
-                    ) as response:
-                        if not 200 <= response.status_code < 300:
-                            return False
-                        response_payload = await self._extract_jsonrpc_payload(response)
+                ) as client,
+                client.stream(
+                    "POST",
+                    url,
+                    json=payload,
+                    headers=headers,
+                ) as response,
+            ):
+                if not 200 <= response.status_code < 300:
+                    return False
+                response_payload = await self._extract_jsonrpc_payload(response)
         except (TimeoutError, httpx.HTTPError, OSError, RuntimeError, ValueError):
             return False
         return (
