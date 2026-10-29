@@ -70,10 +70,15 @@ _HOP_BY_HOP_REQUEST_HEADERS = {
     "keep-alive",
 }
 _DEFAULT_MAX_REQUEST_BODY_BYTES = 1_048_576
+# Keep the pooled-connection expiry far below the shortest upstream keep-alive
+# close (graphiti's uvicorn idle timeout) so the pool always recycles a
+# connection before the upstream can close it. A pooled socket that outlives
+# the upstream's idle close yields an empty/truncated JSON body, which the
+# strict JSON check reports as a 502 "Upstream returned malformed JSON".
 _HTTP_LIMITS = httpx.Limits(
     max_connections=100,
     max_keepalive_connections=20,
-    keepalive_expiry=30.0,
+    keepalive_expiry=3.0,
 )
 
 
@@ -687,6 +692,67 @@ class MCPRouter:
             if response is not None:
                 await stream_context.__aexit__(None, None, None)
 
+    @staticmethod
+    def _is_stale_json_body(body: bytes, headers: Mapping[str, str]) -> bool:
+        """Classify a failed JSON body as stale-socket transport damage.
+
+        Only a body truncated below a *positive* declared Content-Length is
+        treated as stale-socket damage: that is the transport signature of a
+        pooled connection the upstream already closed. An empty body whose
+        declared length is 0 (or which declares no length) is a legitimate
+        complete response (e.g. a 202/204) and must never be retransmitted,
+        nor must a non-empty body whose length matches its declaration.
+        """
+        declared = headers.get("content-length")
+        if declared is None:
+            return False
+        try:
+            expected = int(declared)
+        except ValueError:
+            return False
+        if expected <= 0:
+            return False
+        return len(body) < expected
+
+    async def _retry_upstream_once(
+        self,
+        *,
+        method: str,
+        target_url: str,
+        forward_headers: dict[str, str],
+        request_body: bytes,
+        query_params: dict,
+        endpoint: Endpoint,
+    ) -> str | None:
+        """Re-issue a single upstream request on a fresh one-shot connection.
+
+        Returns the validated JSON body text, or None when the retry did not
+        produce a valid JSON response. The one-shot client is never pooled, so
+        a stale keep-alive socket cannot be reused.
+        """
+        one_shot = httpx.AsyncClient()
+        try:
+            response = await asyncio.wait_for(
+                one_shot.request(
+                    method=method,
+                    url=target_url,
+                    headers=forward_headers,
+                    params=query_params,
+                    content=request_body,
+                    timeout=_upstream_stream_timeout(endpoint.upstream_timeout),
+                ),
+                timeout=endpoint.upstream_timeout,
+            )
+            if response.status_code >= 400:
+                return None
+            body_text = response.text
+            parse_strict_json_text(body_text)
+            return body_text
+        except (httpx.HTTPError, OSError, TimeoutError, UnicodeDecodeError, ValueError):
+            return None
+        finally:
+            await one_shot.aclose()
+
     async def _proxy_request(
         self,
         *,
@@ -748,14 +814,56 @@ class MCPRouter:
                 await stream_context.__aexit__(None, None, None)
             try:
                 decoded_body = body_bytes.decode("utf-8")
+                if not body_bytes and response.status_code in (202, 204):
+                    # An MCP notification elicits 202/204 with an empty body
+                    # (often content-type application/json, content-length 0).
+                    # That is a complete, valid response, not a JSON payload:
+                    # forward it as-is instead of failing strict-JSON parsing.
+                    response_headers = self._safe_response_headers(
+                        response.headers,
+                        body_was_decoded=True,
+                        body_was_transformed=False,
+                    )
+                    return Response(
+                        content=b"",
+                        status_code=response.status_code,
+                        headers=response_headers,
+                        media_type=content_type,
+                    )
                 parse_strict_json_text(decoded_body)
             except (UnicodeDecodeError, ValueError):
                 if response.status_code < 500:
                     self._metrics.record_upstream_error(path_prefix)
-                return JSONResponse(
-                    {"error": "Upstream returned malformed JSON"},
-                    status_code=502,
-                )
+                if self._is_stale_json_body(body_bytes, response.headers):
+                    # An empty body, or one truncated below the declared
+                    # Content-Length, is the transport signature of a stale
+                    # pooled upstream connection, not an upstream payload.
+                    # Retry once on a fresh one-shot connection before 502.
+                    retried = await self._retry_upstream_once(
+                        method=request.method,
+                        target_url=target_url,
+                        forward_headers=forward_headers,
+                        request_body=request_body,
+                        query_params=dict(request.query_params),
+                        endpoint=endpoint,
+                    )
+                    if retried is not None:
+                        logger.info(
+                            "Recovered stale-socket JSON response for %s via one-shot retry.",
+                            path_prefix,
+                        )
+                        body_bytes = retried.encode("utf-8")
+                        decoded_body = retried
+                    else:
+                        return JSONResponse(
+                            {"error": "Upstream response read failed"},
+                            status_code=502,
+                        )
+                else:
+                    return JSONResponse(
+                        {"error": "Upstream returned malformed JSON"},
+                        status_code=502,
+                    )
             redacted_body = self._redactor.redact_known_secrets(decoded_body)
             projected_body, policy_changed = policy.project_json_text(
                 redacted_body,

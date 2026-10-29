@@ -1073,6 +1073,78 @@ async def test_unexpected_exit_marks_runtime_failed_and_records_status() -> None
 
 
 @pytest.mark.asyncio
+async def test_initial_startup_failure_schedules_supervisor_restart_when_enabled() -> None:
+    manager = ProcessManager()
+    endpoint = managed_config(
+        restart={
+            "enabled": True,
+            "max_attempts": 3,
+            "initial_backoff": 0.01,
+            "max_backoff": 0.05,
+        }
+    )
+    runtime = EndpointRuntime.from_config(endpoint)
+    first_process = MagicMock()
+    first_process.pid = 41001
+    first_process.returncode = 23
+    first_process.wait = AsyncMock(return_value=23)
+    first_process.stdout = MagicMock()
+    first_process.stdout.readline = AsyncMock(return_value=b"")
+    first_process.stderr = MagicMock()
+    first_process.stderr.readline = AsyncMock(return_value=b"")
+
+    second_exit = asyncio.Event()
+    second_process = MagicMock()
+    second_process.pid = 41002
+    second_process.returncode = None
+
+    async def wait_second() -> int:
+        await second_exit.wait()
+        second_process.returncode = 0
+        return 0
+
+    async def pending_log() -> bytes:
+        await second_exit.wait()
+        return b""
+
+    second_process.wait = AsyncMock(side_effect=wait_second)
+    second_process.stdout = MagicMock()
+    second_process.stdout.readline = AsyncMock(side_effect=pending_log)
+    second_process.stderr = MagicMock()
+    second_process.stderr.readline = AsyncMock(side_effect=pending_log)
+
+    with (
+        patch(
+            "asyncio.create_subprocess_exec",
+            side_effect=[first_process, second_process],
+        ) as create_exec,
+        patch.object(
+            manager,
+            "_wait_for_readiness",
+            new_callable=AsyncMock,
+            side_effect=[False, True],
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="Process terminated before readiness with exit code 23"):
+            await manager.start_managed_server(runtime)
+
+        assert runtime.state is RuntimeState.FAILED
+        assert runtime.last_exit_code == 23
+        restart_task = runtime.restart_task
+        assert restart_task is not None
+        await restart_task
+
+        assert runtime.state is RuntimeState.RUNNING
+        assert runtime.restart_attempts == 1
+        assert runtime.process_restarts_total == 1
+        assert runtime.restart_task is None
+        assert create_exec.call_count == 2
+
+        with patch("os.killpg", side_effect=lambda *_: second_exit.set()):
+            await manager.stop_managed_server(runtime)
+
+
+@pytest.mark.asyncio
 async def test_failed_runtime_rejects_demand_activation_without_resetting_restart_budget() -> None:
     manager = ProcessManager()
     router = MCPRouter(Starlette(), "unused")
