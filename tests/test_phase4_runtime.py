@@ -1261,6 +1261,78 @@ async def test_restart_backoff_revalidates_in_place_policy_before_start(
     assert runtime.restart_task is None
 
 
+@pytest.mark.asyncio
+async def test_restart_reprobes_after_budget_exhaustion_when_reprobe_configured() -> None:
+    manager = ProcessManager()
+    endpoint = managed_config(
+        restart={
+            "enabled": True,
+            "max_attempts": 2,
+            "initial_backoff": 0.01,
+            "max_backoff": 0.02,
+            "reprobe_interval": 0.5,
+        }
+    )
+    runtime = EndpointRuntime.from_config(endpoint)
+    runtime.state = RuntimeState.FAILED
+    runtime.restart_attempts = 2  # budget already exhausted
+
+    sleep_delays: list[float] = []
+
+    async def record_sleep(delay: float) -> None:
+        sleep_delays.append(delay)
+
+    def start_succeeds(*_args: object, **_kwargs: object) -> str:
+        runtime.state = RuntimeState.RUNNING
+        return "http://localhost:3033/mcp"
+
+    start_locked = AsyncMock(side_effect=start_succeeds)
+    with (
+        patch("mcp_router.core.process_manager.asyncio.sleep", side_effect=record_sleep),
+        patch.object(manager, "_start_locked", new=start_locked),
+    ):
+        task = asyncio.create_task(manager._restart_loop(runtime))
+        runtime.restart_task = task
+        await task  # completes after the single re-probe attempt succeeds
+
+    # The re-probe cooldown was the sleep, then the start path was re-entered.
+    assert start_locked.await_count == 1
+    assert sleep_delays == [0.5]
+    assert runtime.restart_attempts == 0  # budget reset for the next cycle
+    assert runtime.state is RuntimeState.RUNNING
+    assert runtime.restart_task is None
+
+
+@pytest.mark.asyncio
+async def test_restart_stops_when_budget_exhausted_and_no_reprobe_configured() -> None:
+    manager = ProcessManager()
+    endpoint = managed_config(
+        restart={
+            "enabled": True,
+            "max_attempts": 2,
+            "initial_backoff": 0.01,
+            "max_backoff": 0.02,
+            # no reprobe_interval -> None -> the legacy give-up behavior
+        }
+    )
+    runtime = EndpointRuntime.from_config(endpoint)
+    runtime.state = RuntimeState.FAILED
+    runtime.restart_attempts = 2  # budget already exhausted
+
+    start_locked = AsyncMock(return_value=None)
+    with patch.object(manager, "_start_locked", new=start_locked):
+        task = asyncio.create_task(manager._restart_loop(runtime))
+        runtime.restart_task = task
+        await task  # should return immediately (budget exhausted, no re-probe)
+
+    # Backward-compatible: no re-probe, so the supervisor stops and the endpoint
+    # stays FAILED until an external reset/restart.
+    start_locked.assert_not_awaited()
+    assert runtime.state is RuntimeState.FAILED
+    assert runtime.restart_attempts == 2
+    assert runtime.restart_task is None
+
+
 @pytest.mark.parametrize(
     ("initial_restart", "replacement_restart"),
     [

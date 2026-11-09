@@ -423,6 +423,11 @@ class ManagedRestartConfig(BaseModel):
     max_attempts: int = Field(default=3, ge=1, le=100)
     initial_backoff: float = Field(default=0.5, gt=0)
     max_backoff: float = Field(default=10.0, gt=0)
+    # When set (> 0), after the restart budget is exhausted the supervisor
+    # cools down for this many seconds, resets the budget, and re-probes, so a
+    # recovered dependency self-heals instead of leaving the endpoint wedged in
+    # a terminal FAILED state. None (default) preserves the legacy give-up.
+    reprobe_interval: float | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def validate_backoff_bounds(self) -> ManagedRestartConfig:
