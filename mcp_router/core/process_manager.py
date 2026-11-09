@@ -343,22 +343,28 @@ class ProcessManager:
                     if not isinstance(endpoint_cfg, ManagedEndpointConfig):
                         return
                     restart = endpoint_cfg.restart
-                    if (
-                        runtime.state is not RuntimeState.FAILED
-                        or not restart.enabled
-                        or runtime.restart_attempts >= restart.max_attempts
-                    ):
+                    if runtime.state is not RuntimeState.FAILED or not restart.enabled:
                         return
-                    runtime.restart_attempts += 1
-                    attempt = runtime.restart_attempts
-                    delay = self._restart_delay(endpoint_cfg, attempt)
+                    if runtime.restart_attempts >= restart.max_attempts:
+                        interval = restart.reprobe_interval
+                        if interval is None or interval <= 0:
+                            return
+                        # Budget exhausted: cool down, reset the budget, and
+                        # re-probe so a recovered dependency self-heals instead
+                        # of leaving the endpoint wedged in FAILED forever.
+                        runtime.restart_attempts = 0
+                        attempt = 0
+                        delay = interval
+                    else:
+                        runtime.restart_attempts += 1
+                        attempt = runtime.restart_attempts
+                        delay = self._restart_delay(endpoint_cfg, attempt)
 
                 logger.warning(
-                    "Restarting managed endpoint '%s' after %.3fs (attempt %s/%s)",
+                    "Restarting managed endpoint '%s' after %.3fs (attempt %s)",
                     runtime.path,
                     delay,
                     attempt,
-                    restart.max_attempts,
                 )
                 await asyncio.sleep(delay)
 
